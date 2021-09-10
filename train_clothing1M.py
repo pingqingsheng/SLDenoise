@@ -16,10 +16,10 @@ import logging
 import time
 import pickle as pkl
 
-from data_clothing1m import Clothing1M, Clothing1M_confidence
-from clothing_resnet import resnet50
-from preact_resnet import preact_resnet34
-from utils import *
+from data.data_clothing1m import Clothing1M, Clothing1M_confidence
+from network.clothing_resnet import resnet50
+from network.preact_resnet import preact_resnet34
+
 
 # @profile
 def main(args):
@@ -81,7 +81,9 @@ def main(args):
         model = resnet50(num_classes=num_class, pretrained=True)
         model_confidence = resnet50(num_classes=num_class, pretrained=True)
     model = nn.DataParallel(model)
-    model.to(device)
+    model_confidence = nn.DataParallel(model_confidence)
+    model = model.to(device)
+    model_confidence = model_confidence.to(device)
 
     print("\n")
     print("============= Parameter Setting ================")
@@ -101,7 +103,7 @@ def main(args):
 
     if os.path.exists('./checkpoints/best_result.pkl'):
         best_result = pkl.load(open('./checkpoints/best_result.pkl', "rb"))
-        best_model = best_result['best_result']
+        best_model = best_result['best_model']
         f_confidence_delta = best_result['confidence_delta']
         test_confidence_delta = best_result['test_confidence_delta']
     else:
@@ -122,6 +124,7 @@ def main(args):
             train_loss = 0
             train_correct = 0
             train_total = 0
+
 
             model.train()
             for iteration, (features, labels, indices) in enumerate(tqdm(train_loader, ascii=True, ncols=50)):
@@ -250,21 +253,22 @@ def main(args):
             best_model = model
 
             best_result = {}
-            best_result['best_model'] = model.detach().cpu()
+            best_result['best_model'] = model
             best_result['confidence_delta'] = f_confidence_delta
             best_result['test_confidence_delta'] = test_confidence_delta
 
-            with open("./checkpoints/best_result.pkl") as f:
-                pkl.dump(f, best_result)
+            best_result_file = f"./checkpoints/best_result_{time_stamp}.pkl"
+            with open(best_result_file, 'wb') as f:
+                pkl.dump(best_result, f)
             f.close()
 
         print(">> Best validation accuracy: {:3.3f}%, at epoch {}".format(best_val_acc, best_val_acc_epoch))
         print(">> Best testing accuracy: {:3.3f}%, at epoch {}".format(best_test_acc, best_test_acc_epoch))
 
     # >>> Collect training confidence and fit confidence model <<<
-    print(">>> Fitting Confidence Model <<<")
-    trainset_confidence = Clothing1M_confidence(data_root='../', labels=f_confidence_delta)
-    testset_confidence = Clothing1M_confidence(data_root='../', labels=test_confidence_delta)
+    print("============= Fitting Confidence Model =============")
+    trainset_confidence = Clothing1M_confidence(data_root=data_root, labels=f_confidence_delta, transform=transform_train)
+    testset_confidence = Clothing1M_confidence(data_root=data_root, labels=test_confidence_delta, transform=transform_test)
     trainloader_confidence = torch.utils.data.DataLoader(trainset_confidence, batch_size=64, shuffle=True, pin_memory=True)
     testloader_confidence = torch.utils.data.DataLoader(testset_confidence, batch_size=64, shuffle=True, pin_memory=True)
 
@@ -277,11 +281,11 @@ def main(args):
                 continue
 
             features, labels = features.to(device), labels.to(device)
-            optimizer.zero_grad()
+            optimizer_confidence.zero_grad()
             outputs = model_confidence(features)
             loss = criterion(outputs, labels)
             loss.backward()
-            optimizer.step()
+            optimizer_confidence.step()
 
             if (iteration % args.eval_freq == 0) and (iteration > 0):
                 print("\n>> Testing <<")
@@ -302,11 +306,13 @@ def main(args):
                 cprint(">> [Epoch: {}] Test Acc: {:3.3f}%\n".format(epoch, test_loss), "yellow")
                 model_confidence.train() # switch back to train status
 
+        scheduler_confidence.step()
+
     # Final testing
     model.eval()
     test_loss = 0
     test_total = 0
-    test_confidence = torch.zeros(len(testset))
+    test_confidence = torch.zeros(len(testset), num_class)
     test_confidence_delta = torch.zeros(len(testset))
     test_prediction = torch.zeros(len(testset))
 
@@ -329,7 +335,7 @@ def main(args):
 
     os.makedirs("./result", exist_ok=True)
     with open("./result/test_confidence_delta.pkl", 'wb') as f:
-        pkl.dump(f, test_confidence_delta)
+        pkl.dump(test_confidence_delta, f)
     f.close()
 
     return 0

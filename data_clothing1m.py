@@ -35,6 +35,7 @@ class Clothing1M(data.Dataset):
         self.targets = self.label_list
 
     def __getitem__(self, index):
+
         image_file_name = self.image_list[index]
         image_path = os.path.join(self.data_root, image_file_name)
 
@@ -80,7 +81,7 @@ class Clothing1M_confidence(data.Dataset):
             image_list = [line.strip() for line in fid.readlines()]
 
         self.image_list = image_list
-        self.label = labels
+        self.label_list = labels
 
     def __getitem__(self, index):
         image_file_name = self.image_list[index]

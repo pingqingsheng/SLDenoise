@@ -172,7 +172,6 @@ class MNIST(data.Dataset):
     def update_labels(self, new_label):
         self.targets[:] = new_label[:]
 
-
 def get_int(b):
     return int(codecs.encode(b, 'hex'), 16)
 

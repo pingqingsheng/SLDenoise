@@ -47,8 +47,7 @@ class MNIST(data.Dataset):
             self.download()
 
         if not self._check_exists():
-            raise RuntimeError('Dataset not found.' +
-                               ' You can use download=True to download it')
+            raise RuntimeError('Dataset not found.' +' You can use download=True to download it')
 
         if self.split == 'test':
             data_file = self.test_file
@@ -73,6 +72,8 @@ class MNIST(data.Dataset):
                 self.targets = self.targets[train_num:]
                 self.num_class = len(np.unique(self.targets))
                 self.num_data = len(self.data)
+        self.delta_eta = torch.zeros(len(self.targets), 10)
+
 
     def __getitem__(self, index):
         """
@@ -81,7 +82,7 @@ class MNIST(data.Dataset):
         Returns:
             tuple: (image, target) where target is index of the target class.
         """
-        img, target = self.data[index], int(self.targets[index])
+        img, target, delta_eta = self.data[index], int(self.targets[index]), self.delta_eta[index]
 
         # doing this so that it is consistent with all other datasets
         # to return a PIL Image
@@ -93,7 +94,7 @@ class MNIST(data.Dataset):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        return index, img, target
+        return index, img, target, delta_eta
 
     def __len__(self):
         return len(self.data)
@@ -171,6 +172,10 @@ class MNIST(data.Dataset):
 
     def update_labels(self, new_label):
         self.targets[:] = new_label[:]
+
+    def set_delta_eta(self, delta_eta):
+        self.delta_eta = delta_eta
+
 
 def get_int(b):
     return int(codecs.encode(b, 'hex'), 16)

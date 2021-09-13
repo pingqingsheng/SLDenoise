@@ -15,16 +15,23 @@ import copy
 import logging
 import time
 import pickle as pkl
+import random
 
-from data.data_clothing1m import Clothing1M, Clothing1M_confidence
+from data.Cloth1M import Clothing1M, Clothing1M_confidence
 from network.clothing_resnet import resnet50
 from network.preact_resnet import preact_resnet34
-
 
 # @profile
 def main(args):
 
     np.random.seed(123)
+    random_seed = args.seed
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    torch.cuda.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed)
+    torch.backends.cudnn.deterministic = True  # need to set to True as well
 
     log_out_dir = './logs/'
     time_stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -303,8 +310,8 @@ def main(args):
                     test_loss += loss.item()
                     test_total += len(labels)
                 test_loss /= test_total
-                cprint(">> [Epoch: {}] Test Acc: {:3.3f}%\n".format(epoch, test_loss), "yellow")
-                model_confidence.train() # switch back to train status
+                cprint(">> [Epoch: {}] Test Loss: {:3.3f}\n".format(epoch, test_loss), "yellow")
+                model_confidence.train() # switch back to train  status
 
         scheduler_confidence.step()
 

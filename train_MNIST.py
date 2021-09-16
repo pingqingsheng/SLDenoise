@@ -236,6 +236,12 @@ def main(args):
                 optimizer_conf.step()
 
                 total_loss+=loss.item()
+
+                # use the inner network predictions to correct the predictions of the first network
+                temp_pred = f_record[inner_epoch % args.rollWindow, indices]
+                temp_pred += outs.detach().cpu()
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(temp_pred, dim=1)
+
             total_loss/=len(trainset)
 
             if not (inner_epoch+1)%MONITOR_WINDOW:

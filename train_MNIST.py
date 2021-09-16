@@ -18,6 +18,7 @@ from data.MNIST import MNIST
 from network.network import resnet18
 from utils.utils import _init_fn
 from utils.noise import perturb_eta
+from utils.utils import lrt_correction
 
 # Experiment Setting Control Panel
 N_EPOCH_OUTER: int = 5
@@ -29,8 +30,8 @@ SCHEDULER_DECAY_MILESTONE: List = [20, 40, 60]
 TRAIN_VALIDATION_RATIO: float = 0.8
 MONITOR_WINDOW: int = 2
 
-def label_correction(y_tilde, eta_corrected):
-    pass
+# def label_correction(y_tilde, eta_corrected, fx):
+#     pass
 
 def main(args):
 
@@ -135,6 +136,10 @@ def main(args):
     valid_conf = torch.zeros([len(validset), 10])
     test_conf  = torch.zeros([len(testset), 10])
 
+    # moving average record for the network predictions
+    f_record = torch.zeros([args.rollWindow, len(y_train), 10])  # MNIST: num_class=10
+    current_delta = args.delta
+
     for outer_epoch in range(N_EPOCH_OUTER):
 
         cprint(f">>>Epoch [{outer_epoch+1}|{N_EPOCH_OUTER}] Train Classifier Model <<<", "green")
@@ -164,6 +169,9 @@ def main(args):
                 train_conf_delta[indices] = torch.abs(onehot_predict - onehot_labels).detach().cpu().float()
                 train_conf[indices] = conf.detach().cpu()
 
+                # record the network predictions
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu(), dim=1)
+
             train_acc = train_correct/train_total
 
             if not (inner_epoch+1)%MONITOR_WINDOW:
@@ -187,6 +195,15 @@ def main(args):
                 print(f"Step [{inner_epoch+1}|{N_EPOCH_INNER}] - Train Loss: {train_loss:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f}")
                 model_cls.train() # switch back to train mode
             scheduler_cls.step()
+
+        # Perform label correction
+        if inner_epoch >= args.warm_up:
+            f_x = f_record.mean(0)
+            y_tilde = trainset.targets
+            y_corrected, current_delta = lrt_correction(np.array(y_tilde).copy(), f_x, current_delta=current_delta, delta_increment=args.inc)
+
+            trainset.targets = y_corrected.numpy().copy()  # update the training labels
+            cprint(f"Performed Label Correction", "yellow")
 
         # Classification Final Test
         test_correct = 0
@@ -278,6 +295,10 @@ if __name__ == "__main__":
     parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='0')
     parser.add_argument("--noise_type",  type=str, help="Noise type", default='linear', choices={"linear", "random"})
     parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=1)
+    parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
+    parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
+    parser.add_argument("--delta", default=0.3, help="initial threshold", type=float)
+    parser.add_argument("--inc", default=0.1, help="increment", type=float)
     args = parser.parse_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus

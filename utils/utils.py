@@ -5,6 +5,7 @@ import hashlib
 import errno
 from tqdm import tqdm
 import numpy as np
+import torch
 
 def _init_fn(worker_id):
     np.random.seed(77 + worker_id)
@@ -142,3 +143,33 @@ def check_folder(save_dir):
 # random seed related
 def init_fn_(worker_id):
     np.random.seed(77 + worker_id)
+
+
+def lrt_correction(y_tilde, f_x, current_delta=0.3, delta_increment=0.1):
+    """
+    Label correction using likelihood ratio test. 
+    In effect, it gradually decreases the threshold according to Algorithm 1.
+    
+    current_delta: The initial threshold $\theta$
+    delta_increment: The step size, corresponding to the $\beta$ in Algorithm 1.
+    """
+    corrected_count = 0
+    y_noise = torch.tensor(y_tilde).clone()
+    n = len(y_noise)
+    f_m = f_x.max(1)[0]
+    y_mle = f_x.argmax(1)
+    LR = []
+    for i in range(len(y_noise)):
+        LR.append(float(f_x[i][int(y_noise[i])]/f_m[i]))
+
+    for i in range(int(len(y_noise))):
+        if LR[i] < current_delta:
+            y_noise[i] = y_mle[i]
+            corrected_count += 1
+
+    if corrected_count < 0.001*n:
+        current_delta += delta_increment
+        current_delta = min(current_delta, 0.9)
+        cprint("Update Critical Value -> {}".format(current_delta), "red")
+
+    return y_noise, current_delta

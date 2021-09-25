@@ -84,37 +84,9 @@ def noisify_with_P(y_train, nb_classes, noise, random_state=None):
 
 
 def noisify_mnist_asymmetric(y_train, noise, random_state=None):
-    """mistakes:
-        1 <- 7
-        2 -> 7
-        3 -> 8
-        5 <-> 6
+    """mistakes
+        
     """
-    nb_classes = 10
-    P = np.eye(nb_classes)
-    n = noise
-    keep_indices = np.arange(len(y_train))
-
-    if n > 0.0:
-        # 1 <- 7
-        P[7, 7], P[7, 1] = 1. - n, n
-        # 2 -> 7
-        P[2, 2], P[2, 7] = 1. - n, n
-        # 5 <-> 6
-        P[5, 5], P[5, 6] = 1. - n, n
-        P[6, 6], P[6, 5] = 1. - n, n
-        # 3 -> 8
-        P[3, 3], P[3, 8] = 1. - n, n
-        y_train_noisy = multiclass_noisify(y_train, P=P, random_state=random_state)
-        actual_noise = (y_train_noisy != y_train).mean()
-        keep_indices = np.where(y_train_noisy == y_train)[0]
-
-        assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
-
-        y_train = y_train_noisy
-
-    return y_train, P, keep_indices
 
 
 def noisify_cifar10_asymmetric(y_train, noise, random_state=None):

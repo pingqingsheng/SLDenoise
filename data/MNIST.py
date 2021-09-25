@@ -199,3 +199,66 @@ def read_image_file(path):
         num_cols = get_int(data[12:16])
         parsed = np.frombuffer(data, dtype=np.uint8, offset=16)
         return torch.from_numpy(parsed).view(length, num_rows, num_cols)
+
+
+class MNIST_Combo(MNIST):
+
+    def __init__(self, root, exogeneous_var, split='train', train_ratio=0.9, transform=None, target_transform=None, download=True):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.split = split  # training set or test set
+        self.train_ratio = train_ratio
+
+        if download:
+            self.download()
+
+        if not self._check_exists():
+            raise RuntimeError('Dataset not found.' +' You can use download=True to download it')
+
+        if self.split == 'test':
+            data_file = self.test_file
+        else:
+            data_file = self.training_file
+        self.data, self.targets = torch.load(os.path.join(self.processed_folder, data_file))
+        self.targets = self.targets.numpy().tolist()
+        self.num_class = len(np.unique(self.targets))
+        self.num_data = len(self.data)
+        self.exogeneous_var = exogeneous_var
+
+        # split the original train set into train & validation set
+        if self.split != 'test':
+            num_data = len(self.data)
+            train_num = int(num_data * self.train_ratio)
+            if self.split == 'train':
+                self.data = self.data[:train_num]
+                self.targets = self.targets[:train_num]
+                self.num_class = len(np.unique(self.targets))
+                self.num_data = len(self.data)
+            else:
+                self.data = self.data[train_num:]
+                self.targets = self.targets[train_num:]
+                self.num_class = len(np.unique(self.targets))
+                self.num_data = len(self.data)
+        self.delta_eta = torch.zeros(len(self.targets), 10)
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target, delta_eta, exogeneous_var = self.data[index], int(self.targets[index]), self.delta_eta[index], self.exogeneous_var[index]
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img.numpy(), mode='L')
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return index, img, target, delta_eta, exogeneous_var

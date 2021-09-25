@@ -325,7 +325,7 @@ class ResNet(nn.Module):
 class ResNet_Share(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, in_channels=3, zero_init_residual=False):
-        super(ResNet_Share, self).__init__()
+        super(ResNet, self).__init__()
         self.inplanes = 64
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
@@ -337,7 +337,8 @@ class ResNet_Share(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, num_classes+1)
+        self.fc1 = nn.Linear(512 * block.expansion, 512 * block.expansion)
+        self.fc2 = nn.Linear(512 * block.expansion, num_classes+1)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -397,16 +398,6 @@ def resnet18(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
-    return model
-
-def resnet18_share(pretrained=False, **kwargs):
-    """Constructs a ResNet-18 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet_Share(BasicBlock, [2, 2, 2, 2], **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
     return model

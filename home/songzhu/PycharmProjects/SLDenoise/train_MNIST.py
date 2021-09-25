@@ -18,9 +18,10 @@ from data.MNIST import MNIST
 from network.network import resnet18
 from utils.utils import _init_fn
 from utils.noise import perturb_eta
+from utils.utils import lrt_correction
 
 # Experiment Setting Control Panel
-N_EPOCH_OUTER: int = 5
+N_EPOCH_OUTER: int = 10
 N_EPOCH_INNER: int = 4
 LR: float = 1e-3
 WEIGHT_DECAY: float = 5e-4
@@ -29,8 +30,6 @@ SCHEDULER_DECAY_MILESTONE: List = [20, 40, 60]
 TRAIN_VALIDATION_RATIO: float = 0.8
 MONITOR_WINDOW: int = 2
 
-def label_correction(y_tilde, eta_corrected):
-    pass
 
 def main(args):
 
@@ -88,7 +87,8 @@ def main(args):
     y_tilde_train = [int(np.where(np.random.multinomial(1,x,1).squeeze())[0]) for x in eta_tilde_train]
     y_tilde_valid = [int(np.where(np.random.multinomial(1,x,1).squeeze())[0]) for x in eta_tilde_valid]
     trainset.update_labels(y_tilde_train)
-    validset.update_labels(y_tilde_valid)
+    validset.update_labels(h_star_valid)
+    testset.update_labels(h_star_test)
     train_noise_ind = np.where(np.array(y_train)!=np.array(y_tilde_train))[0]
     valid_noise_ind = np.where(np.array(y_valid)!=np.array(y_tilde_valid))[0]
 
@@ -114,6 +114,7 @@ def main(args):
     print(f"Noisy Validation Data Points: \t\t\t {len(valid_noise_ind)}")
     print(f"Noisy Type: \t\t\t\t\t {args.noise_type}")
     print(f"Noisy Strength: \t\t\t\t {args.noise_strength}")
+    print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind)/len(trainset)*100:.2f}%")
     print("---------------------------------------------------------")
 
     model_cls = resnet18(num_classes=10, in_channels=1)
@@ -136,6 +137,10 @@ def main(args):
     valid_conf = torch.zeros([len(validset), 10])
     test_conf_delta = torch.zeros([len(testset), 10])
     test_conf  = torch.zeros([len(testset), 10])
+
+    # moving average record for the network predictions
+    f_record = torch.zeros([args.rollWindow, len(y_train), 10])  # MNIST: num_class=10
+    current_delta = args.delta
 
     for outer_epoch in range(N_EPOCH_OUTER):
 
@@ -163,8 +168,11 @@ def main(args):
 
                 onehot_labels  = F.one_hot(labels, num_classes=10)
                 onehot_predict = F.one_hot(predict, num_classes=10)
-                train_conf_delta[indices] = torch.abs(onehot_predict - onehot_labels).detach().cpu().float()
+                train_conf_delta[indices] = (onehot_predict-onehot_labels).detach().cpu().float()
                 train_conf[indices] = conf.detach().cpu()
+
+                # record the network predictions
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu(), dim=1)
 
             train_acc = train_correct/train_total
 
@@ -185,11 +193,11 @@ def main(args):
 
                     onehot_labels = F.one_hot(labels, num_classes=10)
                     onehot_predict = F.one_hot(predict, num_classes=10)
-                    valid_conf_delta[indices] = torch.abs(onehot_labels - onehot_predict).detach().cpu().float()
+                    valid_conf_delta[indices] = (onehot_predict - onehot_labels).detach().cpu().float()
                     valid_conf[indices] = torch.softmax(outs, 1).detach().cpu()
 
                 valid_acc = valid_correct/valid_total
-                print(f"Step [{inner_epoch+1}|{N_EPOCH_INNER}] - Train Loss: {train_loss:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f}")
+                print(f"Step [{inner_epoch+1}|{N_EPOCH_INNER}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f}")
                 model_cls.train() # switch back to train mode
             scheduler_cls.step()
 
@@ -208,8 +216,21 @@ def main(args):
 
             onehot_labels = F.one_hot(labels, num_classes=10)
             onehot_predict = F.one_hot(predict, num_classes=10)
-            test_conf_delta[indices] = torch.abs(onehot_labels - onehot_predict).detach().cpu().float()
+            test_conf_delta[indices] = (onehot_predict-onehot_labels).detach().cpu().float()
+            test_conf[indices] = torch.softmax(outs, 1).detach().cpu().float()
         cprint(f"Classification Test Acc: {test_correct/test_total:7.3f}", "cyan")
+
+        # ---------------------------------------------------- Debugging Purpose -------------------------------------------------------------
+        # # Perform label correction
+        # if (outer_epoch + 1) >= args.warm_up:
+        #     f_x = f_record.mean(0)
+        #     y_tilde = trainset.targets
+        #     y_corrected, current_delta = lrt_correction(np.array(y_tilde).copy(), f_x, current_delta=current_delta, delta_increment=args.inc)
+        #     trainset.targets = y_corrected.numpy().copy()  # update the training labels
+        #     # y_corrected = f_x.argmax(1).squeeze()
+        #     # trainset.targets = y_corrected
+        #     cprint(f"Performed Label Correction", "yellow")
+        # --------------------------------------------------------------------------------------------------------------------------------------
 
         cprint(f">>>Epoch [{outer_epoch+1}|{N_EPOCH_OUTER}] Train Confidence Model <<<", "green")
         trainset.set_delta_eta(train_conf_delta)
@@ -230,11 +251,17 @@ def main(args):
                 optimizer_conf.step()
 
                 total_loss+=len(delta_eta)*loss.item()**2
-            total_loss=(total_loss/len(trainset))**(1/2)
+
+                # # use the inner network predictions to correct the predictions of the first network
+                temp_pred = f_record[inner_epoch % args.rollWindow, indices]
+                temp_pred += outs.detach().cpu()
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(temp_pred, dim=1)
+                
+            ave_loss=(total_loss/len(trainset))**(1/2)
 
             if not (inner_epoch+1)%MONITOR_WINDOW:
-                valid_loss = 0
-                valid_loss_delta_eta = 0
+                valid_sample_loss = 0
+                valid_real_loss = 0
                 model_conf.eval()
                 for _, (indices, images, _, delta_eta) in enumerate(tqdm(valid_loader, ascii=True, ncols=100)):
                     if images.shape[0]==1:
@@ -242,22 +269,22 @@ def main(args):
                     images, delta_eta = images.to(device), delta_eta.to(device)
                     outs = model_conf(images)
                     _, predict = outs.max(1)
-                    loss = criterion_conf(outs, delta_eta)
 
-                    valid_loss+=len(delta_eta)*(loss.item())**2
                     outs = outs.detach().cpu()
+                    valid_sample_loss = criterion_conf(outs, delta_eta.detach().cpu())
+                    valid_sample_loss+=len(delta_eta)*(valid_sample_loss.item())**2
                     one_hot_h_star_valid = F.one_hot(h_star_valid[indices], num_classes=10)
-                    delta_eta_valid = torch.abs(one_hot_h_star_valid - torch.softmax(outs, 1))
-                    valid_loss_delta_eta+=len(delta_eta)*criterion_conf(outs, delta_eta_valid)**2
+                    delta_eta_valid = one_hot_h_star_valid - torch.softmax(outs, 1)
+                    valid_real_loss+=len(delta_eta)*criterion_conf(outs, delta_eta_valid)**2
 
-                valid_mse = (valid_loss/len(validset))**(1/2)
-                valid_mse_delta_eta = (valid_loss_delta_eta/len(validset))**(1/2)
-                print(f"Step [{inner_epoch+1}|{N_EPOCH_INNER}] - Train Loss: {train_loss:7.3f} - Valid Loss: {valid_mse:7.3f} - Valid Delta Eta Mse: {valid_mse_delta_eta:7.3f}")
+                valid_sample_mse = (valid_sample_loss/len(validset))**(1/2)
+                valid_real_mse = (valid_real_loss/len(validset))**(1/2)
+                print(f"Step [{inner_epoch+1}|{N_EPOCH_INNER}] - Train Loss: {ave_loss:7.3f} - Valid Loss: {valid_sample_mse:7.3f} - Valid Delta Eta Mse: {valid_real_mse:7.3f}")
                 model_conf.train() # switch back to train mode
             scheduler_conf.step()
 
-        test_loss = 0
-        test_loss_delta_eta = 0
+        test_samples_loss = 0
+        test_real_loss = 0
         model_conf.eval()
         for _, (indices, images, _, delta_eta) in enumerate(tqdm(test_loader, ascii=True, ncols=100)):
             if images.shape[0] == 1:
@@ -266,19 +293,29 @@ def main(args):
             outs = model_conf(images)
             _, predict = outs.max(1)
 
-            loss = criterion_conf(outs, delta_eta)
-
-            test_loss += len(labels)*(loss.item())**2
             outs = outs.detach().cpu()
+            test_sample_loss = criterion_conf(outs, delta_eta.detach().cpu())
+            test_samples_loss += len(labels)*(test_sample_loss.item())**2
             one_hot_h_star_test = F.one_hot(h_star_test[indices], num_classes=10)
             delta_eta_test = torch.abs(one_hot_h_star_test - torch.softmax(outs, 1))
-            test_loss_delta_eta += len(labels)*criterion_conf(outs, delta_eta_test)**2
 
-        test_mse = (test_loss / len(testset))**(1/2)
-        test_mse_delta_eta = (test_loss_delta_eta / len(testset))**(1/2)
-        cprint(f"Regression Test Loss: {test_mse:7.3f} - Regression Test Delta Eta Mse: {test_mse_delta_eta:7.3f}", "cyan")
+            pdb.set_trace()
 
-        # TODO: add labels correction here
+            test_real_loss += len(labels)*criterion_conf(outs, delta_eta_test)**2
+
+        test_samples_mse = (test_samples_loss / len(testset))**(1/2)
+        test_real_mse = (test_real_loss / len(testset))**(1/2)
+        cprint(f"Regression Test Loss: {test_samples_mse:7.3f} - Regression Test Delta Eta Mse: {test_real_mse:7.3f}", "cyan")
+
+        # # Perform label correction
+        if (outer_epoch + 1) >= args.warm_up:
+            f_x = f_record.mean(0)
+            # y_tilde = trainset.targets
+            # y_corrected, current_delta = lrt_correction(np.array(y_tilde).copy(), f_x, current_delta=current_delta, delta_increment=args.inc)
+            # trainset.targets = y_corrected.numpy().copy()  # update the training labels
+            y_corrected = f_x.argmax(1).squeeze()
+            trainset.targets = y_corrected
+            cprint(f"Performed Label Correction", "yellow")
 
     return 0
 
@@ -289,6 +326,10 @@ if __name__ == "__main__":
     parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='0')
     parser.add_argument("--noise_type",  type=str, help="Noise type", default='linear', choices={"linear", "random"})
     parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=1)
+    parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
+    parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
+    parser.add_argument("--delta", default=0.1, help="initial threshold", type=float)
+    parser.add_argument("--inc", default=0.1, help="increment", type=float)
     args = parser.parse_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus

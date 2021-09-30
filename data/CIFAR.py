@@ -391,9 +391,9 @@ if __name__ == "__main__":
 
     # Experiment Setting Control Panel
     SEED: int = 123
-    N_EPOCH: int = 40
-    LR: float = 1e-3
-    WEIGHT_DECAY: float = 5e-3
+    N_EPOCH: int = 1
+    LR: float = 2e-5
+    WEIGHT_DECAY: float = 1e-2
     BATCH_SIZE: int = 128
     SCHEDULER_DECAY_MILESTONE: List = [20, 40, 60]
     TRAIN_VALIDATION_RATIO: float = 0.8

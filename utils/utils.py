@@ -145,31 +145,42 @@ def init_fn_(worker_id):
     np.random.seed(77 + worker_id)
 
 
-def lrt_correction(y_tilde, f_x, current_delta=0.3, delta_increment=0.1):
+class ECELoss(torch.nn.Module):
     """
-    Label correction using likelihood ratio test. 
-    In effect, it gradually decreases the threshold according to Algorithm 1.
-    
-    current_delta: The initial threshold $\theta$
-    delta_increment: The step size, corresponding to the $\beta$ in Algorithm 1.
+    Calculates the Expected Calibration Error of a model.
+    (This isn't necessary for temperature scaling, just a cool metric).
+    The input to this loss is the logits of a model, NOT the softmax scores.
+    This divides the confidence outputs into equally-sized interval bins.
+    In each bin, we compute the confidence gap:
+    bin_gap = | avg_confidence_in_bin - accuracy_in_bin |
+    We then return a weighted average of the gaps, based on the number
+    of samples in each bin
+    See: Naeini, Mahdi Pakdaman, Gregory F. Cooper, and Milos Hauskrecht.
+    "Obtaining Well Calibrated Probabilities Using Bayesian Binning." AAAI.
+    2015.
     """
-    corrected_count = 0
-    y_noise = torch.tensor(y_tilde).clone()
-    n = len(y_noise)
-    f_m = f_x.max(1)[0]
-    y_mle = f_x.argmax(1)
-    LR = []
-    for i in range(len(y_noise)):
-        LR.append(float(f_x[i][int(y_noise[i])]/f_m[i]))
+    def __init__(self, n_bins=15):
+        """
+        n_bins (int): number of confidence interval bins
+        """
+        super(ECELoss, self).__init__()
+        bin_boundaries = torch.linspace(0, 1, n_bins + 1)
+        self.bin_lowers = bin_boundaries[:-1]
+        self.bin_uppers = bin_boundaries[1:]
 
-    for i in range(int(len(y_noise))):
-        if LR[i] < current_delta:
-            y_noise[i] = y_mle[i]
-            corrected_count += 1
+    def forward(self, logits, labels):
+        softmaxes = F.softmax(logits, dim=1)
+        confidences, predictions = torch.max(softmaxes, 1)
+        accuracies = predictions.eq(labels)
 
-    if corrected_count < 0.001*n:
-        current_delta += delta_increment
-        current_delta = min(current_delta, 0.9)
-        print("Update Critical Value -> {}".format(current_delta))
+        ece = torch.zeros(1, device=logits.device)
+        for bin_lower, bin_upper in zip(self.bin_lowers, self.bin_uppers):
+            # Calculated |confidence - accuracy| in each bin
+            in_bin = confidences.gt(bin_lower.item()) * confidences.le(bin_upper.item())
+            prop_in_bin = in_bin.float().mean()
+            if prop_in_bin.item() > 0:
+                accuracy_in_bin = accuracies[in_bin].float().mean()
+                avg_confidence_in_bin = confidences[in_bin].mean()
+                ece += torch.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
 
-    return y_noise, current_delta
+        return ece

@@ -1,4 +1,6 @@
 from __future__ import print_function
+import sys
+sys.path.append("../")
 import torch.utils.data as data
 from PIL import Image
 import os
@@ -262,3 +264,132 @@ class MNIST_Combo(MNIST):
             target = self.target_transform(target)
 
         return index, img, target, delta_eta, exogeneous_var
+
+
+if __name__ == "__main__":
+
+    from typing import List
+
+    import torch
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader
+    from torch.nn import DataParallel
+    from torchvision import transforms
+    import numpy as np
+    import random
+    from tqdm import tqdm
+    import copy
+    from termcolor import cprint
+
+    from data.MNIST import MNIST
+    from network.network import resnet18
+    from utils.utils import _init_fn
+
+    # Experiment Setting Control Panel
+    SEED: int = 123
+    N_EPOCH: int = 8
+    LR: float = 1e-6
+    WEIGHT_DECAY: float = 1e-2
+    BATCH_SIZE: int = 128
+    SCHEDULER_DECAY_MILESTONE: List = [20, 40, 60]
+    TRAIN_VALIDATION_RATIO: float = 0.8
+    MONITOR_WINDOW: int = 2
+    GPU_IND: str = "0"
+
+    seed = SEED
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True  # need to set to True as well
+
+    os.environ['CUDA_VISIBLE_DEVICES'] = GPU_IND
+    device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
+
+    # Data Loading and Processing
+    transform_train = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+    ])
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+    ])
+    trainset = MNIST(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+    validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+    testset  = MNIST(root='./data', split="test", download=True, transform=transform_test)
+    # model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean.pth")
+
+    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+
+    model_cls = resnet18(num_classes=10, in_channels=1)
+    model_cls = DataParallel(model_cls)
+    model_cls = model_cls.to(device)
+
+    optimizer_cls = torch.optim.Adam(model_cls.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler_cls = torch.optim.lr_scheduler.MultiStepLR(optimizer_cls, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
+
+    criterion_cls = torch.nn.CrossEntropyLoss()
+
+    for inner_epoch in range(N_EPOCH):
+        train_correct = 0
+        train_total = 0
+        train_loss = 0
+        for _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100)):
+            if images.shape[0] == 1:
+                continue
+            optimizer_cls.zero_grad()
+            images, labels = images.to(device), labels.to(device)
+            outs = model_cls(images)
+            conf = torch.softmax(outs, 1)
+            loss = criterion_cls(outs, labels)
+            loss.backward()
+            optimizer_cls.step()
+
+            train_loss += loss.detach().cpu().item()
+            _, predict = outs.max(1)
+            train_correct += predict.eq(labels).sum().item()
+            train_total += len(labels)
+
+        train_acc = train_correct / train_total
+
+        if not (inner_epoch + 1) % MONITOR_WINDOW:
+
+            valid_correct = 0
+            valid_total = 0
+            model_cls.eval()
+            for _, (indices, images, labels, _) in enumerate(tqdm(valid_loader, ascii=True, ncols=100)):
+                if images.shape[0] == 1:
+                    continue
+                images, labels = images.to(device), labels.to(device)
+                outs = model_cls(images)
+
+                _, predict = outs.max(1)
+                valid_correct += predict.eq(labels).sum().item()
+                valid_total += len(labels)
+
+            valid_acc = valid_correct / valid_total
+            print(f"Step [{inner_epoch + 1}|{N_EPOCH}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f}")
+            model_cls.train()  # switch back to train mode
+        scheduler_cls.step()
+
+    # Classification Final Test
+    test_correct = 0
+    test_total = 0
+    model_cls.eval()
+    for _, (indices, images, labels, _) in enumerate(test_loader):
+        if images.shape[0] == 1:
+            continue
+        images, labels = images.to(device), labels.to(device)
+        outs = model_cls(images)
+        _, predict = outs.max(1)
+        test_correct += predict.eq(labels).sum().item()
+        test_total += len(labels)
+    cprint(f"Classification Test Acc: {test_correct / test_total:7.3f}", "cyan")
+
+    # Save clean model
+    model_file_name = "MNIST_resnet18_clean.pth"
+    torch.save(model_cls, model_file_name)

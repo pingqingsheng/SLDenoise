@@ -21,16 +21,17 @@ from utils.utils import _init_fn
 from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
 
 # Experiment Setting Control Panel
+# ---------------------------------------------------
 N_EPOCH_OUTER: int = 1
 N_EPOCH_INNER_CLS: int = 60
-CONF_RECORD_EPOCH: int = 59
+CONF_RECORD_EPOCH: int = N_EPOCH_INNER_CLS - 1
 LR: float = 1e-3
 WEIGHT_DECAY: float = 5e-3
 BATCH_SIZE: int = 128
 SCHEDULER_DECAY_MILESTONE: List = [5, 10, 15]
 TRAIN_VALIDATION_RATIO: float = 0.8
 MONITOR_WINDOW: int = 2
-
+# ----------------------------------------------------
 
 def lrt_correction(y_tilde, f_x, current_delta=0.3, delta_increment=0.1):
     """
@@ -61,8 +62,8 @@ def lrt_correction(y_tilde, f_x, current_delta=0.3, delta_increment=0.1):
 
     return y_noise, current_delta
 
-def main(args):
 
+def main(args):
     seed = args.seed
     np.random.seed(seed)
     random.seed(seed)
@@ -76,7 +77,6 @@ def main(args):
     # Data Loading and Processing
 
     if args.dataset == 'mnist':
-
         transform_train = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
@@ -89,6 +89,7 @@ def main(args):
         validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
         testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
         input_channel = 1
+        num_classes = 10
         if args.noise_strength == 0.2:
             model_cls_clean = torch.load("./data/MNIST_resnet18_clean_20.pth")
         elif args.noise_strength == 0.4:
@@ -97,10 +98,7 @@ def main(args):
             model_cls_clean = torch.load("./data/MNIST_resnet18_clean_60.pth")
         else:
             model_cls_clean = torch.load("./data/MNIST_resnet18_clean_80.pth")
-        num_classes = 10
-
     elif args.dataset == 'cifar10':
-
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -115,6 +113,7 @@ def main(args):
         validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
         testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
         input_channel = 3
+        num_classes = 10
         if args.noise_strength == 0.2:
             model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_20.pth")
         elif args.noise_strength == 0.4:
@@ -123,7 +122,7 @@ def main(args):
             model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_60.pth")
         else:
             model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_80.pth")
-        num_classes = 10
+
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
     valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
     test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -176,17 +175,16 @@ def main(args):
         eta_tilde_test  = np.matmul(F.one_hot(h_star_test, num_classes=10), P)
         trainset.update_labels(y_tilde_train)
     elif args.noise_type=="idl":
-        eta_tilde_train = copy.deepcopy(eta_train).numpy().astype(np.float64)
-        eta_tilde_valid = copy.deepcopy(eta_valid).numpy().astype(np.float64)
-        eta_tilde_test  = copy.deepcopy(eta_test).numpy().astype(np.float64)
-
-        y_tilde_train = [int(np.where(np.random.multinomial(1, x/sum(x), 1).squeeze())[0]) for x in eta_tilde_train]
-        y_tilde_valid = [int(np.where(np.random.multinomial(1, x/sum(x), 1).squeeze())[0]) for x in eta_tilde_valid]
+        eta_tilde_train = copy.deepcopy(eta_train)
+        eta_tilde_valid = copy.deepcopy(eta_valid)
+        eta_tilde_test  = copy.deepcopy(eta_test)
+        y_tilde_train = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_train]
+        y_tilde_valid = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_valid]
         trainset.update_labels(y_tilde_train)
 
     validset.update_labels(h_star_valid)
     testset.update_labels(h_star_test)
-    train_noise_ind = np.where(np.logical_not(np.array(y_train) == np.array(y_tilde_train)))[0]
+    train_noise_ind = np.where(np.array(y_train) != np.array(y_tilde_train))[0]
 
     print("---------------------------------------------------------")
     print("                   Experiment Setting                    ")
@@ -212,7 +210,7 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls = resnet18(num_classes=num_classes+1, in_channels=input_channel)
+    model_cls = resnet18(num_classes=num_classes*2, in_channels=input_channel)
     model_cls = DataParallel(model_cls)
     model_cls = model_cls.to(device)
 
@@ -224,43 +222,45 @@ def main(args):
     # criterion_conf = torch.nn.L1Loss()
 
     train_conf_delta = torch.zeros([len(trainset)])
-    train_conf = torch.zeros([len(trainset), num_classes])
+    train_conf = torch.zeros([len(trainset), 10])
     valid_conf_delta = torch.zeros([len(validset)])
-    valid_conf = torch.zeros([len(validset), num_classes])
+    valid_conf = torch.zeros([len(validset), 10])
     test_conf_delta = torch.zeros([len(testset)])
-    test_conf = torch.zeros([len(testset), num_classes])
+    test_conf = torch.zeros([len(testset), 10])
     test_conf_delta_pred = torch.zeros(len(testset))
 
     # moving average record for the network predictions
-    f_record = torch.zeros([args.rollWindow, len(y_train), num_classes])
+    f_record = torch.zeros([args.rollWindow, len(y_train), 10])  # MNIST: num_class=10
     current_delta = args.delta # for LRT
 
     for outer_epoch in range(N_EPOCH_OUTER):
 
         cprint(f">>>Epoch [{outer_epoch + 1}|{N_EPOCH_OUTER}] Train Share Backbone Model <<<", "green")
-        model_cls.train()
+
         for inner_epoch in range(N_EPOCH_INNER_CLS):
             train_correct = 0
             train_total = 0
             train_loss = 0
+            model_cls.train()
             for _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100)):
                 if images.shape[0] == 1:
                     continue
                 optimizer_cls.zero_grad()
                 images, labels = images.to(device), labels.to(device)
                 outs = model_cls(images)
-                _, predict = outs.max(1)
-                correct_prediction = predict.eq(labels).float()
-                loss = criterion_cls(outs[:, :-1], labels) + criterion_conf(torch.sigmoid(outs[:, -1]), correct_prediction)
+                _, predict = outs[:, :num_classes].max(1)
+                with torch.no_grad():
+                    delta_prediction = F.one_hot(labels.squeeze(), num_classes=num_classes) - F.one_hot(predict.squeeze(), num_classes=num_classes).float()
+                loss = criterion_cls(outs[:, :num_classes], labels) + criterion_conf(torch.sigmoid(outs[:, num_classes:]), delta_prediction)
                 loss.backward()
                 optimizer_cls.step()
 
                 train_loss += loss.detach().cpu().item()
-                train_correct += correct_prediction.sum().item()
+                train_correct += predict.eq(labels).sum().item()
                 train_total += len(labels)
 
                 # record the network predictions
-                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu()[:, :-1], dim=1)
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu()[:, :num_classes], dim=1)
 
             train_acc = train_correct / train_total
             scheduler_cls.step()
@@ -276,42 +276,45 @@ def main(args):
                     images, labels = images.to(device), labels.to(device)
                     outs = model_cls(images)
 
-                    _, predict = outs[:, :-1].max(1)
+                    _, predict = outs[:, :num_classes].max(1)
                     correct_prediction = predict.eq(labels).float()
                     valid_correct += correct_prediction.sum().item()
                     valid_total += len(labels)
 
-                    reg_loss = criterion_conf(torch.sigmoid(outs[:, -1]).detach().cpu(), torch.tensor(eta_tilde_valid[indices].max(1)))
+                    pred_onehot = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
+                    reg_loss = criterion_conf(torch.sigmoid(outs[:, num_classes:]).detach().cpu()+pred_onehot, torch.tensor(eta_tilde_valid[indices]))
 
                 valid_acc = valid_correct / valid_total
                 print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f} - Valid Reg Loss: {reg_loss:7.3f}")
-                model_cls.train()  # switch back to train mode
-
 
             if inner_epoch == CONF_RECORD_EPOCH:
                 # Epoch to record neural network's confidence
                 test_correct = 0
                 test_total = 0
+                test_conf = torch.zeros(len(testset), num_classes)
                 model_cls.eval()
                 for _, (indices, images, labels, _) in enumerate(test_loader):
                     if images.shape[0] == 1:
                         continue
                     images, labels = images.to(device), labels.to(device)
                     outs = model_cls(images)
-                    _, predict = outs[:, :-1].max(1)
+                    _, predict = outs[:, :num_classes].max(1)
                     correct_prediction = predict.eq(labels).float()
                     test_correct += correct_prediction.sum().item()
                     test_total += len(labels)
 
-                    reg_loss = criterion_conf(torch.sigmoid(outs[:, -1]).detach().cpu(), torch.tensor(eta_tilde_test[indices].max(1)))
+                    test_conf[indices, :] = torch.softmax(outs[:, :num_classes], 1).detach().cpu()
+
+                    pred_onehot = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
+                    reg_loss = criterion_conf(torch.sigmoid(outs[:, num_classes:]).detach().cpu()+pred_onehot, torch.tensor(eta_tilde_valid[indices]))
 
                 cprint(f"Classification Test Acc: {test_correct / test_total:7.3f} - Test Reg Loss: {reg_loss:7.3f}", "cyan")
 
         # Classification Final Test
         test_correct = 0
         test_total = 0
-        test_conf_model = torch.zeros(len(testset)).float()
-        test_conf_predict = torch.zeros(len(testset)).float()
+        test_predict = torch.zeros(len(testset), num_classes).float()
+        test_conf_predict = torch.zeros(len(testset), num_classes).float()
 
         model_cls.eval()
         for _, (indices, images, labels, _) in enumerate(test_loader):
@@ -319,12 +322,12 @@ def main(args):
                 continue
             images, labels = images.to(device), labels.to(device)
             outs = model_cls(images)
-            _, predict = outs[:, :-1].max(1)
+            _, predict = outs[:, :num_classes].max(1)
             test_correct += predict.eq(labels).sum().item()
             test_total += len(labels)
 
-            test_conf_model[indices] = torch.softmax(outs[:, :-1], 1).max(1)[0].detach().cpu()
-            test_conf_predict[indices] = torch.sigmoid(outs[:, -1]).detach().cpu()
+            test_predict[indices] = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
+            test_conf_predict[indices] = torch.sigmoid(outs[:, num_classes:]).detach().cpu()
 
         # ---------------------------------------------------- Debugging Purpose -------------------------------------------------------------
         # # Perform label correction
@@ -338,11 +341,12 @@ def main(args):
         #     cprint(f"Performed Label Correction", "yellow")
         # --------------------------------------------------------------------------------------------------------------------------------------
 
-    print("Test eta_tilde: ", eta_tilde_test[:5].max(1)[0])
-    print("Test test_confidence: ", test_conf_model[:5])
+    print("Test eta_tilde: ", eta_tilde_test[:5])
+    print("Test test_confidence: ", test_conf[:5])
     print("Test test_conf_delta_pred: ", test_conf_predict[:5])
-    print("MSE - Model Conf: ", criterion_conf(test_conf_model.squeeze(), torch.tensor(eta_tilde_test.max(1).squeeze())))
-    print("MSE - Ours: ", criterion_conf(test_conf_predict.squeeze(), torch.tensor(eta_tilde_test.max(1).squeeze())))
+    print("MSE - Model Conf: ", criterion_conf(test_conf_predict+test_predict, torch.tensor(eta_tilde_test)))
+    print("MSE - Ours: ", criterion_conf(test_conf_predict.squeeze(), torch.tensor(eta_tilde_test)))
+    print("Final Test Acc: ", test_correct/test_total*100, "%")
 
     return 0
 

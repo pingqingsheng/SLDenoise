@@ -16,7 +16,7 @@ from termcolor import cprint
 
 from data.MNIST import MNIST, MNIST_Combo
 from data.CIFAR import CIFAR10, CIFAR10_Combo
-from network.network import resnet18_share
+from network.network import resnet18
 from utils.utils import _init_fn
 from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
 from utils.utils import lrt_correction
@@ -24,7 +24,6 @@ from utils.utils import lrt_correction
 # Experiment Setting Control Panel
 N_EPOCH_OUTER: int = 1
 N_EPOCH_INNER_CLS: int = 60
-N_EPOCH_INNER_CONF: int = 60
 CONF_RECORD_EPOCH: int = 59
 LR: float = 1e-3
 WEIGHT_DECAY: float = 5e-3
@@ -35,6 +34,7 @@ MONITOR_WINDOW: int = 2
 
 
 def main(args):
+
     seed = args.seed
     np.random.seed(seed)
     random.seed(seed)
@@ -61,7 +61,16 @@ def main(args):
         validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
         testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
         input_channel = 1
-        model_cls_clean = torch.load("./data/MNSIT_resnet18_clean.pth")
+        if args.noise_strength == 0.2:
+            model_cls_clean = torch.load("./data/MNIST_resnet18_clean_20.pth")
+        elif args.noise_strength == 0.4:
+            model_cls_clean = torch.load("./data/MNIST_resnet18_clean_40.pth")
+        elif args.noise_strength == 0.6:
+            model_cls_clean = torch.load("./data/MNIST_resnet18_clean_60.pth")
+        else:
+            model_cls_clean = torch.load("./data/MNIST_resnet18_clean_80.pth")
+        num_classes = 10
+
     elif args.dataset == 'cifar10':
 
         transform_train = transforms.Compose([
@@ -78,8 +87,15 @@ def main(args):
         validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
         testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
         input_channel = 3
-        model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean.pth")
-
+        if args.noise_strength == 0.2:
+            model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_20.pth")
+        elif args.noise_strength == 0.4:
+            model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_40.pth")
+        elif args.noise_strength == 0.6:
+            model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_60.pth")
+        else:
+            model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean_80.pth")
+        num_classes = 10
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
     valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
     test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -132,16 +148,17 @@ def main(args):
         eta_tilde_test  = np.matmul(F.one_hot(h_star_test, num_classes=10), P)
         trainset.update_labels(y_tilde_train)
     elif args.noise_type=="idl":
-        eta_tilde_train = copy.deepcopy(eta_train)
-        eta_tilde_valid = copy.deepcopy(eta_valid)
-        eta_tilde_test  = copy.deepcopy(eta_test)
-        y_tilde_train = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_train]
-        y_tilde_valid = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_valid]
+        eta_tilde_train = copy.deepcopy(eta_train).numpy().astype(np.float64)
+        eta_tilde_valid = copy.deepcopy(eta_valid).numpy().astype(np.float64)
+        eta_tilde_test  = copy.deepcopy(eta_test).numpy().astype(np.float64)
+
+        y_tilde_train = [int(np.where(np.random.multinomial(1, x/sum(x), 1).squeeze())[0]) for x in eta_tilde_train]
+        y_tilde_valid = [int(np.where(np.random.multinomial(1, x/sum(x), 1).squeeze())[0]) for x in eta_tilde_valid]
         trainset.update_labels(y_tilde_train)
 
     validset.update_labels(h_star_valid)
     testset.update_labels(h_star_test)
-    train_noise_ind = np.where(np.array(y_train) != np.array(y_tilde_train))[0]
+    train_noise_ind = np.where(np.logical_not(np.array(y_train) == np.array(y_tilde_train)))[0]
 
     print("---------------------------------------------------------")
     print("                   Experiment Setting                    ")
@@ -149,7 +166,6 @@ def main(args):
     print(f"Network: \t\t\t ResNet18")
     print(f"Number of Outer Epochs: \t {N_EPOCH_OUTER}")
     print(f"Number of cls Inner Epochs: \t {N_EPOCH_INNER_CLS}")
-    print(f"Number of conf Inner Epochs: \t {N_EPOCH_INNER_CONF}")
     print(f"Learning Rate: \t\t\t {LR}")
     print(f"Weight Decay: \t\t\t {WEIGHT_DECAY}")
     print(f"Batch Size: \t\t\t {BATCH_SIZE}")
@@ -168,7 +184,7 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls = resnet18_share(num_classes=10, in_channels=input_channel)
+    model_cls = resnet18(num_classes=num_classes+1, in_channels=input_channel)
     model_cls = DataParallel(model_cls)
     model_cls = model_cls.to(device)
 
@@ -180,20 +196,20 @@ def main(args):
     # criterion_conf = torch.nn.L1Loss()
 
     train_conf_delta = torch.zeros([len(trainset)])
-    train_conf = torch.zeros([len(trainset), 10])
+    train_conf = torch.zeros([len(trainset), num_classes])
     valid_conf_delta = torch.zeros([len(validset)])
-    valid_conf = torch.zeros([len(validset), 10])
+    valid_conf = torch.zeros([len(validset), num_classes])
     test_conf_delta = torch.zeros([len(testset)])
-    test_conf = torch.zeros([len(testset), 10])
+    test_conf = torch.zeros([len(testset), num_classes])
     test_conf_delta_pred = torch.zeros(len(testset))
 
     # moving average record for the network predictions
-    f_record = torch.zeros([args.rollWindow, len(y_train), 10])  # MNIST: num_class=10
+    f_record = torch.zeros([args.rollWindow, len(y_train), num_classes])
     current_delta = args.delta # for LRT
 
     for outer_epoch in range(N_EPOCH_OUTER):
 
-        cprint(f">>>Epoch [{outer_epoch + 1}|{N_EPOCH_OUTER}] Train Classifier Model <<<", "green")
+        cprint(f">>>Epoch [{outer_epoch + 1}|{N_EPOCH_OUTER}] Train Share Backbone Model <<<", "green")
         model_cls.train()
         for inner_epoch in range(N_EPOCH_INNER_CLS):
             train_correct = 0
@@ -205,23 +221,21 @@ def main(args):
                 optimizer_cls.zero_grad()
                 images, labels = images.to(device), labels.to(device)
                 outs = model_cls(images)
-                conf = torch.softmax(outs, 1)
-                loss = criterion_cls(outs, labels)
+                _, predict = outs.max(1)
+                correct_prediction = predict.eq(labels).float()
+                loss = criterion_cls(outs[:, :-1], labels) + criterion_conf(torch.sigmoid(outs[:, -1]), correct_prediction)
                 loss.backward()
                 optimizer_cls.step()
 
                 train_loss += loss.detach().cpu().item()
-                _, predict = outs.max(1)
-                train_correct += predict.eq(labels).sum().item()
+                train_correct += correct_prediction.sum().item()
                 train_total += len(labels)
 
-                train_conf_delta[indices] = (predict.eq(labels).squeeze()).detach().cpu().float()
-                train_conf[indices] = conf.detach().cpu()
-
                 # record the network predictions
-                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu(), dim=1)
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu()[:, :-1], dim=1)
 
             train_acc = train_correct / train_total
+            scheduler_cls.step()
 
             if not (inner_epoch + 1) % MONITOR_WINDOW:
 
@@ -234,17 +248,17 @@ def main(args):
                     images, labels = images.to(device), labels.to(device)
                     outs = model_cls(images)
 
-                    _, predict = outs.max(1)
-                    valid_correct += predict.eq(labels).sum().item()
+                    _, predict = outs[:, :-1].max(1)
+                    correct_prediction = predict.eq(labels).float()
+                    valid_correct += correct_prediction.sum().item()
                     valid_total += len(labels)
 
-                    valid_conf_delta[indices] = (predict.eq(labels).squeeze()).detach().cpu().float()
-                    valid_conf[indices] = torch.softmax(outs, 1).detach().cpu()
+                    reg_loss = criterion_conf(torch.sigmoid(outs[:, -1]).detach().cpu(), torch.tensor(eta_tilde_valid[indices].max(1)))
 
                 valid_acc = valid_correct / valid_total
-                print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f}")
+                print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f} - Valid Reg Loss: {reg_loss:7.3f}")
                 model_cls.train()  # switch back to train mode
-            scheduler_cls.step()
+
 
             if inner_epoch == CONF_RECORD_EPOCH:
                 # Epoch to record neural network's confidence
@@ -256,29 +270,34 @@ def main(args):
                         continue
                     images, labels = images.to(device), labels.to(device)
                     outs = model_cls(images)
-                    _, predict = outs.max(1)
-                    test_correct += predict.eq(labels).sum().item()
+                    _, predict = outs[:, :-1].max(1)
+                    correct_prediction = predict.eq(labels).float()
+                    test_correct += correct_prediction.sum().item()
                     test_total += len(labels)
 
-                    # onehot_labels = F.one_hot(labels, num_classes=10)
-                    # onehot_predict = F.one_hot(predict, num_classes=10)
-                    test_conf_delta[indices] = (predict.eq(labels).squeeze()).detach().cpu().float()
-                    test_conf[indices] = torch.softmax(outs, 1).detach().cpu().float()
-                cprint(f"Classification Test Acc: {test_correct / test_total:7.3f}", "cyan")
+                    reg_loss = criterion_conf(torch.sigmoid(outs[:, -1]).detach().cpu(), torch.tensor(eta_tilde_test[indices].max(1)))
+
+                cprint(f"Classification Test Acc: {test_correct / test_total:7.3f} - Test Reg Loss: {reg_loss:7.3f}", "cyan")
 
         # Classification Final Test
         test_correct = 0
         test_total = 0
+        test_conf_model = torch.zeros(len(testset)).float()
+        test_conf_predict = torch.zeros(len(testset)).float()
+
         model_cls.eval()
         for _, (indices, images, labels, _) in enumerate(test_loader):
             if images.shape[0] == 1:
                 continue
             images, labels = images.to(device), labels.to(device)
             outs = model_cls(images)
-            _, predict = outs.max(1)
+            _, predict = outs[:, :-1].max(1)
             test_correct += predict.eq(labels).sum().item()
             test_total += len(labels)
-        cprint(f"Classification Test Acc: {test_correct / test_total:7.3f}", "cyan")
+
+            test_conf_model[indices] = torch.softmax(outs[:, :-1], 1).max(1)[0].detach().cpu()
+            test_conf_predict[indices] = torch.sigmoid(outs[:, -1]).detach().cpu()
+
         # ---------------------------------------------------- Debugging Purpose -------------------------------------------------------------
         # # Perform label correction
         # if (outer_epoch + 1) >= args.warm_up:
@@ -291,120 +310,11 @@ def main(args):
         #     cprint(f"Performed Label Correction", "yellow")
         # --------------------------------------------------------------------------------------------------------------------------------------
 
-        cprint(f">>>Epoch [{outer_epoch + 1}|{N_EPOCH_OUTER}] Train Confidence Model <<<", "green")
-
-        # if args.dataset == 'mnist':
-        #     trainset_conf = MNIST_Combo(root="./data", exogeneous_var=train_conf.max(1)[0], split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        #     validset_conf = MNIST_Combo(root="./data", exogeneous_var=valid_conf.max(1)[0], split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-        #     testset_conf = MNIST_Combo(root="./data", exogeneous_var=test_conf.max(1)[0], split="test", download=True, transform=transform_test)
-        # elif args.dataset == 'cifar10':
-        #     trainset_conf = CIFAR10_Combo(root="./data", exogeneous_var=train_conf.max(1)[0], split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        #     validset_conf = CIFAR10_Combo(root="./data", exogeneous_var=valid_conf.max(1)[0], split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-        #     testset_conf = CIFAR10_Combo(root="./data", exogeneous_var=test_conf.max(1)[0], split="test", download=True, transform=transform_test)
-        if args.dataset == 'mnist':
-            trainset_conf = MNIST_Combo(root="./data", exogeneous_var=train_conf, split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-            validset_conf = MNIST_Combo(root="./data", exogeneous_var=valid_conf, split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-            testset_conf = MNIST_Combo(root="./data", exogeneous_var=test_conf, split="test", download=True, transform=transform_test)
-        elif args.dataset == 'cifar10':
-            trainset_conf = CIFAR10_Combo(root="./data", exogeneous_var=train_conf, split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-            validset_conf = CIFAR10_Combo(root="./data", exogeneous_var=valid_conf, split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-            testset_conf = CIFAR10_Combo(root="./data", exogeneous_var=test_conf, split="test", download=True, transform=transform_test)
-
-        train_conf_loader = DataLoader(trainset_conf, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-        valid_conf_loader = DataLoader(validset_conf, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-        test_conf_loader = DataLoader(testset_conf, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-
-        trainset_conf.set_delta_eta(train_conf_delta)
-        validset_conf.set_delta_eta(valid_conf_delta)
-        testset_conf.set_delta_eta(test_conf_delta)
-
-        model_conf.train()
-        for inner_epoch in range(N_EPOCH_INNER_CONF):
-            total_loss = 0
-            for _, (indices, images, _, delta_eta, train_conf_batch) in enumerate(tqdm(train_conf_loader, ascii=True, ncols=100)):
-                if images.shape[0] == 1:
-                    continue
-                optimizer_conf.zero_grad()
-                images, delta_eta, train_conf_batch = images.to(device), delta_eta.to(device), train_conf_batch.to(device)
-                outs = model_conf(images, exogeneous_var=train_conf_batch)
-                loss = criterion_conf(outs, delta_eta)
-                loss.backward()
-                optimizer_conf.step()
-
-                total_loss += len(delta_eta) * loss.item() ** 2
-
-                # # use the inner network predictions to correct the predictions of the first network
-                # temp_pred = f_record[inner_epoch % args.rollWindow, indices]
-                # temp_pred += outs.detach().cpu()
-                # f_record[inner_epoch % args.rollWindow, indices] = F.softmax(temp_pred, dim=1)
-            ave_loss = (total_loss / len(trainset)) ** (1 / 2)
-
-            if not (inner_epoch + 1) % MONITOR_WINDOW:
-                valid_sample_loss = 0
-                valid_real_loss = 0
-                model_conf.eval()
-                for _, (indices, images, _, delta_eta, valid_conf_batch) in enumerate(tqdm(valid_conf_loader, ascii=True, ncols=100)):
-                    if images.shape[0] == 1:
-                        continue
-                    images, delta_eta, valid_conf_batch = images.to(device), delta_eta.to(device), valid_conf_batch.to(device)
-                    outs = model_conf(images, exogeneous_var = valid_conf_batch)
-                    _, predict = outs.max(1)
-
-                    outs = outs.detach().cpu()
-                    valid_sample_loss = criterion_conf(outs, delta_eta.detach().cpu())
-                    valid_sample_loss += len(labels) * (valid_sample_loss.item())**2
-                    # one_hot_h_star_valid = F.one_hot(h_star_valid[indices], num_classes=10)
-                    # delta_eta_valid = one_hot_h_star_valid - torch.softmax(outs, 1)
-                    # valid_real_loss += len(delta_eta) * criterion_conf(outs, delta_eta_valid) ** 2
-                    valid_real_loss = criterion_conf(outs, eta_tilde_valid.max(1)[0])
-                    valid_real_loss += len(delta_eta) * (valid_real_loss.item())**2
-
-                valid_sample_mse = (valid_sample_loss / len(validset)) ** (1 / 2)
-                valid_real_mse = (valid_real_loss / len(validset)) ** (1 / 2)
-                print(
-                    f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CONF}] - Train Loss: {ave_loss:7.3f} - Valid Loss: {valid_sample_mse:7.3f} - Valid Delta Eta Mse: {valid_real_mse:7.3f}")
-                model_conf.train()  # switch back to train mode
-            scheduler_conf.step()
-
-        test_samples_loss = 0
-        test_real_loss = 0
-        model_conf.eval()
-        for _, (indices, images, _, delta_eta, test_conf_batch) in enumerate(tqdm(test_conf_loader, ascii=True, ncols=100)):
-            if images.shape[0] == 1:
-                continue
-            images, delta_eta, test_conf_batch = images.to(device), delta_eta.to(device), test_conf_batch.to(device)
-            outs = model_conf(images, exogeneous_var=test_conf_batch)
-            _, predict = outs.max(1)
-
-            outs = torch.sigmoid(outs).detach().cpu()
-            test_sample_loss = criterion_conf(outs, delta_eta.detach().cpu())
-            test_samples_loss += len(labels) * (test_sample_loss.item()) ** 2
-            # one_hot_h_star_test = F.one_hot(h_star_test[indices], num_classes=10)
-            # delta_eta_test = torch.abs(one_hot_h_star_test - torch.softmax(outs, 1))
-            test_real_loss = criterion_conf(outs, eta_tilde_test.max(1)[0])
-            test_real_loss += len(delta_eta)*(test_real_loss.item())**2
-
-            test_conf_delta_pred[indices] = outs.squeeze()
-
-        test_samples_mse = (test_samples_loss / len(testset)) ** (1 / 2)
-        test_real_mse = (test_real_loss / len(testset)) ** (1 / 2)
-        cprint(f"Regression Test Loss: {test_samples_mse:7.3f} - Regression Test Delta Eta Mse: {test_real_mse:7.3f}", "cyan")
-
-        # # # Perform label correction
-        # if (outer_epoch + 1) >= args.warm_up:
-        #     f_x = f_record.mean(0)
-        #     # y_tilde = trainset.targets
-        #     # y_corrected, current_delta = lrt_correction(np.array(y_tilde).copy(), f_x, current_delta=current_delta, delta_increment=args.inc)
-        #     # trainset.targets = y_corrected.numpy().copy()  # update the training labels
-        #     y_corrected = f_x.argmax(1).squeeze()
-        #     trainset.targets = y_corrected
-        #     cprint(f"Performed Label Correction", "yellow")
-
     print("Test eta_tilde: ", eta_tilde_test[:5].max(1)[0])
-    print("Test test_confidence: ", test_conf.max(1)[0][:5])
-    print("Test test_conf_delta_pred: ", test_conf_delta_pred[:5])
-    print("MSE - Model Conf: ", criterion_conf(test_conf.max(1)[0].squeeze(), eta_tilde_test.max(1)[0].squeeze()))
-    print("MSE - Ours: ", criterion_conf(test_conf_delta_pred.squeeze(), eta_tilde_test.max(1)[0].squeeze()))
+    print("Test test_confidence: ", test_conf_model[:5])
+    print("Test test_conf_delta_pred: ", test_conf_predict[:5])
+    print("MSE - Model Conf: ", criterion_conf(test_conf_model.squeeze(), torch.tensor(eta_tilde_test.max(1).squeeze())))
+    print("MSE - Ours: ", criterion_conf(test_conf_predict.squeeze(), torch.tensor(eta_tilde_test.max(1).squeeze())))
 
     return 0
 

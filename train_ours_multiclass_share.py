@@ -17,20 +17,21 @@ from termcolor import cprint
 from data.MNIST import MNIST, MNIST_Combo
 from data.CIFAR import CIFAR10, CIFAR10_Combo
 from network.network import resnet18
-from utils.utils import _init_fn
+from utils.utils import _init_fn, ECELoss, my_logits
 from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
+from baselines.temperature_scaling.temperature_scaling import ModelWithTemperature
 
 # Experiment Setting Control Panel
 # ---------------------------------------------------
 N_EPOCH_OUTER: int = 1
-N_EPOCH_INNER_CLS: int = 60
+N_EPOCH_INNER_CLS: int = 25
 CONF_RECORD_EPOCH: int = N_EPOCH_INNER_CLS - 1
 LR: float = 1e-3
 WEIGHT_DECAY: float = 5e-3
 BATCH_SIZE: int = 128
 SCHEDULER_DECAY_MILESTONE: List = [5, 10, 15]
 TRAIN_VALIDATION_RATIO: float = 0.8
-MONITOR_WINDOW: int = 2
+MONITOR_WINDOW: int = 5
 # ----------------------------------------------------
 
 def lrt_correction(y_tilde, f_x, current_delta=0.3, delta_increment=0.1):
@@ -219,7 +220,7 @@ def main(args):
 
     criterion_cls = torch.nn.CrossEntropyLoss()
     criterion_conf = torch.nn.MSELoss()
-    # criterion_conf = torch.nn.L1Loss()
+    criterion_calibrate = ECELoss()
 
     train_conf_delta = torch.zeros([len(trainset)])
     train_conf = torch.zeros([len(trainset), 10])
@@ -269,6 +270,7 @@ def main(args):
 
                 valid_correct = 0
                 valid_total = 0
+                ece_loss = 0
                 model_cls.eval()
                 for _, (indices, images, labels, _) in enumerate(tqdm(valid_loader, ascii=True, ncols=100)):
                     if images.shape[0] == 1:
@@ -282,10 +284,12 @@ def main(args):
                     valid_total += len(labels)
 
                     pred_onehot = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
-                    reg_loss = criterion_conf(torch.sigmoid(outs[:, num_classes:]).detach().cpu()+pred_onehot, torch.tensor(eta_tilde_valid[indices]))
+                    f_calibrate = torch.sigmoid(outs[:, num_classes:]).detach().cpu()+pred_onehot
+                    reg_loss = criterion_conf(f_calibrate, torch.tensor(eta_tilde_valid[indices]))
+                    ece_loss += criterion_calibrate.forward(logits=my_logits(f_calibrate, eps=1e-4), labels=torch.tensor(eta_tilde_valid[indices]).argmax(1).squeeze())
 
                 valid_acc = valid_correct / valid_total
-                print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f} - Valid Reg Loss: {reg_loss:7.3f}")
+                print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f} - Valid Reg Loss: {reg_loss:7.3f} - ECE Loss: {ece_loss.item():7.3f}")
 
             if inner_epoch == CONF_RECORD_EPOCH:
                 # Epoch to record neural network's confidence
@@ -329,6 +333,8 @@ def main(args):
             test_predict[indices] = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
             test_conf_predict[indices] = torch.sigmoid(outs[:, num_classes:]).detach().cpu()
 
+            # Temperature Scaling Baseline
+
         # ---------------------------------------------------- Debugging Purpose -------------------------------------------------------------
         # # Perform label correction
         # if (outer_epoch + 1) >= args.warm_up:
@@ -346,10 +352,12 @@ def main(args):
     print("Test test_conf_delta_pred: ", test_conf_predict[:5])
     print("MSE - Model Conf: ", criterion_conf(test_conf_predict+test_predict, torch.tensor(eta_tilde_test)))
     print("MSE - Ours: ", criterion_conf(test_conf_predict.squeeze(), torch.tensor(eta_tilde_test)))
+    print("ECE - Model Conf: ", criterion_calibrate.forward(logits=my_logits(test_conf_predict.squeeze(), eps=1e-4), labels=torch.tensor(eta_tilde_test).argmax(1).squeeze()))
+    print("ECE - Ours: ", criterion_calibrate.forward(logits=my_logits(test_conf_predict + test_predict, eps=1e-4), labels=torch.tensor(eta_tilde_test).argmax(1).squeeze()))
     print("Final Test Acc: ", test_correct/test_total*100, "%")
 
-    return 0
 
+    return 0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")

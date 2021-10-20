@@ -6,6 +6,7 @@ import errno
 from tqdm import tqdm
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 def _init_fn(worker_id):
     np.random.seed(77 + worker_id)
@@ -169,6 +170,7 @@ class ECELoss(torch.nn.Module):
         self.bin_uppers = bin_boundaries[1:]
 
     def forward(self, logits, labels):
+
         softmaxes = F.softmax(logits, dim=1)
         confidences, predictions = torch.max(softmaxes, 1)
         accuracies = predictions.eq(labels)
@@ -182,5 +184,11 @@ class ECELoss(torch.nn.Module):
                 accuracy_in_bin = accuracies[in_bin].float().mean()
                 avg_confidence_in_bin = confidences[in_bin].mean()
                 ece += torch.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
-
         return ece
+
+def my_logits(p:torch.Tensor, eps:float=None):
+    if eps:
+        p = torch.clamp(p, 0, 1)
+        return torch.clamp(torch.log(p/(1-p)), torch.log(torch.tensor(eps/(1-eps))), torch.log(torch.tensor((1-eps)/eps)))
+    else:
+        return torch.log(p/(1-p)).item()

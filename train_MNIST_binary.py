@@ -16,9 +16,9 @@ from termcolor import cprint
 
 from data.MNIST import MNIST
 from network.network import resnet18
-from utils.utils import _init_fn
-from utils.noise import perturb_eta
-from utils.utils import lrt_correction
+from baseline_utils.utils import _init_fn
+from baseline_utils.noise import perturb_eta
+from baseline_utils.utils import lrt_correction
 
 # Experiment Setting Control Panel
 N_EPOCH_OUTER: int = 1
@@ -201,24 +201,25 @@ def main(args):
                 model_cls.train()  # switch back to train mode
             scheduler_cls.step()
 
-        # Classification Final Test
-        test_correct = 0
-        test_total = 0
-        model_cls.eval()
-        for _, (indices, images, labels, _) in enumerate(test_loader):
-            if images.shape[0] == 1:
-                continue
-            images, labels = images.to(device), labels.to(device)
-            outs = model_cls(images)
-            _, predict = outs.max(1)
-            test_correct += predict.eq(labels).sum().item()
-            test_total += len(labels)
+            # Classification Final Test
+            if inner_epoch == 1:
+                test_correct = 0
+                test_total = 0
+                model_cls.eval()
+                for _, (indices, images, labels, _) in enumerate(test_loader):
+                    if images.shape[0] == 1:
+                        continue
+                    images, labels = images.to(device), labels.to(device)
+                    outs = model_cls(images)
+                    _, predict = outs.max(1)
+                    test_correct += predict.eq(labels).sum().item()
+                    test_total += len(labels)
 
-            # onehot_labels = F.one_hot(labels, num_classes=10)
-            # onehot_predict = F.one_hot(predict, num_classes=10)
-            test_conf_delta[indices] = (predict.eq(labels).squeeze()).detach().cpu().float()
-            test_conf[indices] = torch.softmax(outs, 1).detach().cpu().float()
-        cprint(f"Classification Test Acc: {test_correct / test_total:7.3f}", "cyan")
+                    # onehot_labels = F.one_hot(labels, num_classes=10)
+                    # onehot_predict = F.one_hot(predict, num_classes=10)
+                    test_conf_delta[indices] = (predict.eq(labels).squeeze()).detach().cpu().float()
+                    test_conf[indices] = torch.softmax(outs, 1).detach().cpu().float()
+                cprint(f"Classification Test Acc: {test_correct / test_total:7.3f}", "cyan")
 
         # ---------------------------------------------------- Debugging Purpose -------------------------------------------------------------
         # # Perform label correction

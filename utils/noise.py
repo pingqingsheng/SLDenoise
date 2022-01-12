@@ -73,7 +73,7 @@ def noisify_with_P(y_train, nb_classes, noise, random_state=None):
         keep_indices = np.where(y_train_noisy == y_train)[0]
 
         assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
+        # print('Actual noise %.2f' % actual_noise)
 
         y_train = y_train_noisy
     else:
@@ -110,7 +110,7 @@ def noisify_mnist_asymmetric(y_train, noise, random_state=None):
         keep_indices = np.where(y_train_noisy == y_train)[0]
 
         assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
+        # print('Actual noise %.2f' % actual_noise)
 
         y_train = y_train_noisy
 
@@ -149,7 +149,7 @@ def noisify_cifar10_asymmetric(y_train, noise, random_state=None):
         keep_indices = np.where(y_train_noisy == y_train)[0]
 
         assert actual_noise > 0.0
-        print('Actual noise %.2f' % actual_noise)
+        # print('Actual noise %.2f' % actual_noise)
 
         y_train = y_train_noisy
 

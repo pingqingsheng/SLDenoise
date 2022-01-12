@@ -17,9 +17,9 @@ from termcolor import cprint
 from data.MNIST import MNIST, MNIST_Combo
 from data.CIFAR import CIFAR10, CIFAR10_Combo
 from network.network import resnet18, ResNet18_Combo_Plus
-from utils.utils import _init_fn
-from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
-from utils.utils import lrt_correction
+from baseline_utils.utils import _init_fn
+from baseline_utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
+from baseline_utils.utils import lrt_correction
 
 # Experiment Setting Control Panel
 N_EPOCH_OUTER: int = 1

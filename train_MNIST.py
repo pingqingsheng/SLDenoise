@@ -16,9 +16,9 @@ from termcolor import cprint
 
 from data.MNIST import MNIST
 from network.network import resnet18
-from utils.utils import _init_fn
-from utils.noise import perturb_eta
-from utils.utils import lrt_correction
+from baseline_utils.utils import _init_fn
+from baseline_utils.noise import perturb_eta
+from baseline_utils.utils import lrt_correction
 
 # Experiment Setting Control Panel
 N_EPOCH_OUTER: int = 10
@@ -309,7 +309,6 @@ def main(args):
 
         # # Perform label correction
         if (outer_epoch + 1) >= args.warm_up:
-
             f_x = f_record.mean(0)
             # y_tilde = trainset.targets
             # y_corrected, current_delta = lrt_correction(np.array(y_tilde).copy(), f_x, current_delta=current_delta, delta_increment=args.inc)

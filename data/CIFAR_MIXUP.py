@@ -14,9 +14,9 @@ else:
 import torch
 import torch.utils.data as data
 from utils.utils import download_url, check_integrity
+import copy
 
-
-class CIFAR10(data.Dataset):
+class CIFAR10_MIXUP(data.Dataset):
     """`CIFAR10 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
     Args:
         root (string): Root directory of dataset where directory
@@ -54,13 +54,15 @@ class CIFAR10(data.Dataset):
 
     def __init__(self, root, split='train', train_ratio=0.8, trust_ratio=0.1,
                  transform=None, target_transform=None,
-                 download=False):
+                 download=False,
+                 mode='warm'):
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform
         self.split = split  # training set, validation set or test set
         self.train_ratio = train_ratio
         self.trust_ratio = trust_ratio
+        self.mode = mode
 
         if download:
             self.download()
@@ -131,6 +133,9 @@ class CIFAR10(data.Dataset):
                 self.softlabel[i, self.targets[i]] = 1 - eps
 
         self.delta_eta = torch.zeros(len(self.targets), 10)
+        self.data_complete = copy.deepcopy(self.data)
+        self.targets_complete = copy.deepcopy(self.targets)
+        self.delta_eta_complete = copy.deepcopy(self.delta_eta)
 
         self._load_meta()
 
@@ -160,13 +165,19 @@ class CIFAR10(data.Dataset):
         # to return a PIL Image
         img = Image.fromarray(img)
 
-        if self.transform is not None:
-            img = self.transform(img)
-
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        return index, img, target, delta_eta
+        if self.mode in ['warm', 'eval']:
+            if self.transform is not None:
+                img = self.transform(img)
+            if self.target_transform is not None:
+                target = self.target_transform(target)
+            return index, img, target, delta_eta
+        else:
+            if self.transform is not None:
+                img1 = self.transform(img)
+                img2 = self.transform(img)
+            if self.target_transform is not None:
+                target = self.target_transform(target)
+            return index, img1, img2, target, delta_eta
 
     def __len__(self):
         return len(self.data)
@@ -218,8 +229,14 @@ class CIFAR10(data.Dataset):
     def set_delta_eta(self, delta_eta):
         self.delta_eta = delta_eta
 
+    def select_data(self, select_id):
+        self.data = self.data_complete[select_id]
+        self.targets = [self.targets_complete[i] for i in select_id]
+        self.delta_eta = self.delta_eta_complete[select_id]
+        self.num_data = len(self.data)
 
-class CIFAR10_Combo(CIFAR10):
+
+class CIFAR10_Combo(CIFAR10_MIXUP):
 
     def __init__(self, root, exogeneous_var, split='train', train_ratio=0.8, trust_ratio=0.1,
                  transform=None, target_transform=None,
@@ -326,7 +343,7 @@ class CIFAR10_Combo(CIFAR10):
         return index, img, target, delta_eta, exogeneous_var
 
 
-class CIFAR100(CIFAR10):
+class CIFAR100_MIXUP(CIFAR10_MIXUP):
     """`CIFAR100 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
     This is a subclass of the `CIFAR10` Dataset.
     """

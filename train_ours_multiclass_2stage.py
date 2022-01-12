@@ -25,7 +25,8 @@ from baselines.temperature_scaling.temperature_scaling import ModelWithTemperatu
 # Experiment Setting Control Panel
 # ---------------------------------------------------
 N_EPOCH_OUTER: int = 1
-N_EPOCH_INNER_CLS: int = 200
+N_EPOCH_INNER_CLS: int = 5
+N_EPOCH_INNER_CONF: int = 40
 CONF_RECORD_EPOCH: int = N_EPOCH_INNER_CLS - 1
 LR: float = 1e-3
 WEIGHT_DECAY: float = 5e-3
@@ -203,17 +204,21 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls = resnet18(num_classes=num_classes*2, in_channels=input_channel)
+    model_cls = resnet18(num_classes=num_classes, in_channels=input_channel)
     model_cls = DataParallel(model_cls)
     model_cls = model_cls.to(device)
+    model_conf = resnet18(num_classes=num_classes, in_channels=input_channel)
+    model_conf = DataParallel(model_conf)
+    model_conf = model_conf.to(device)
 
     optimizer_cls = torch.optim.Adam(model_cls.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler_cls = torch.optim.lr_scheduler.MultiStepLR(optimizer_cls, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
+    optimizer_conf = torch.optim.Adam(model_conf.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler_conf = torch.optim.lr_scheduler.MultiStepLR(optimizer_conf, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
 
     criterion_cls = torch.nn.CrossEntropyLoss()
     criterion_conf = torch.nn.MSELoss()
     criterion_calibrate = ECELoss()
-    criterion_l1 = torch.nn.L1Loss()
 
     train_conf_delta = torch.zeros([len(trainset)])
     train_conf = torch.zeros([len(trainset), num_classes])
@@ -224,22 +229,24 @@ def main(args):
     test_conf_delta_pred = torch.zeros(len(testset))
 
     # For monitoring purpose
-    _loss_record = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
-    _acc_record  = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
-    _ece_record_conf  = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
-    _ece_record_ours  = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
-    _mse_record_conf  = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
-    _mse_record_ours  = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
+    _loss_record = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CONF-N_EPOCH_INNER_CONF%MONITOR_WINDOW, int((N_EPOCH_INNER_CONF-N_EPOCH_INNER_CONF%MONITOR_WINDOW)/MONITOR_WINDOW+1))))
+    _acc_record  = _loss_record.copy()
+    _ece_record_conf  = _loss_record.copy()
+    _ece_record_ours  = _loss_record.copy()
+    _mse_record_conf  = _loss_record.copy()
+    _mse_record_ours  = _loss_record.copy()
     _count = 0
 
     # moving average record for the network predictions
     f_record = torch.zeros([args.rollWindow, len(y_train), num_classes])
+    delta_prediction_record = torch.zeros(len(trainset), num_classes)
     current_delta = args.delta # for LRT
 
     for outer_epoch in range(N_EPOCH_OUTER):
 
-        cprint(f">>>Epoch [{outer_epoch + 1}|{N_EPOCH_OUTER}] Train Share Backbone Model <<<", "green")
+        cprint(f">>>Epoch [{outer_epoch + 1}|{N_EPOCH_OUTER}] Train Two Stage Model <<<", "green")
 
+        # >>> Step 1: First train classifier model <<<
         for inner_epoch in range(N_EPOCH_INNER_CLS):
             train_correct = 0
             train_total = 0
@@ -250,14 +257,14 @@ def main(args):
                     continue
                 optimizer_cls.zero_grad()
                 images, labels = images.to(device), labels.to(device)
-                outs = model_cls(images)
-                _, predict = outs[:, :num_classes].max(1)
+                outs_cls = model_cls(images)
+                _, predict = outs_cls.max(1)
                 with torch.no_grad():
                     delta_prediction = F.one_hot(labels.squeeze(), num_classes=num_classes) - F.one_hot(predict.squeeze(), num_classes=num_classes).float()
-                loss_main = criterion_cls(outs[:, :num_classes], labels) + criterion_conf(torch.tanh(outs[:, num_classes:]), delta_prediction)
-                loss_en   = -(torch.softmax(outs[:, :num_classes], 1)*torch.log(torch.softmax(outs[:, :num_classes], 1))).mean()
-                loss_sm   = -((1/num_classes*torch.ones(outs[:, :num_classes].shape).to(device))*torch.log(torch.softmax(outs[:, :num_classes], 1))).mean()
-                loss = loss_main + loss_en + loss_sm
+                loss_main = criterion_cls(outs_cls, labels)
+                # loss_en   = -(torch.softmax(outs_cls, 1)*torch.log(torch.softmax(outs_cls, 1))).mean()
+                # loss_sm   = -((1/num_classes*torch.ones(outs_cls.shape).to(device))*torch.log(torch.softmax(outs_cls, 1))).mean()
+                loss = loss_main
                 loss.backward()
                 optimizer_cls.step()
 
@@ -265,11 +272,28 @@ def main(args):
                 train_correct += predict.eq(labels).sum().item()
                 train_total += len(labels)
 
+                # record network prediction delta
+                delta_prediction_record[indices] = delta_prediction.detach().cpu()
                 # record the network predictions
-                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu()[:, :num_classes], dim=1)
+                f_record[inner_epoch % args.rollWindow, indices] = F.softmax(outs_cls.detach().cpu(), dim=1)
 
             train_acc = train_correct / train_total
             scheduler_cls.step()
+
+        # >>> Step 2: Train Confidence Classifier <<<
+        for inner_epoch in range(N_EPOCH_INNER_CONF):
+
+            model_conf.train()
+            for _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100)):
+                if len(images)==1:
+                    continue
+
+                optimizer_conf.zero_grad()
+                images, delta_conf = images.to(device), delta_prediction_record[indices].to(device)
+                outs = model_conf(images)
+                loss = criterion_conf(torch.tanh(outs), delta_conf)
+                loss.backward()
+                optimizer_conf.step()
 
             if not (inner_epoch % MONITOR_WINDOW):
 
@@ -281,36 +305,40 @@ def main(args):
                 valid_conf_predict = torch.zeros(len(validset), num_classes).float()
 
                 model_cls.eval()
+                model_conf.eval()
                 for _, (indices, images, labels, _) in enumerate(tqdm(valid_loader, ascii=True, ncols=100)):
                     if images.shape[0] == 1:
                         continue
                     images, labels = images.to(device), labels.to(device)
-                    outs = model_cls(images)
+                    outs_cls = model_cls(images)
+                    outs_conf = model_conf(images)
 
-                    _, predict = outs[:, :num_classes].max(1)
+                    _, predict = outs_cls.max(1)
                     correct_prediction = predict.eq(labels).float()
                     valid_correct += correct_prediction.sum().item()
                     valid_total += len(labels)
 
                     pred_onehot = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
-                    f_calibrate = torch.tanh(outs[:, num_classes:]).detach().cpu()+pred_onehot
+                    f_calibrate = torch.tanh(outs_conf).detach().cpu()+pred_onehot
                     reg_loss = criterion_conf(f_calibrate, torch.tensor(eta_tilde_valid[indices]))
 
                     valid_predict[indices] = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
-                    valid_conf_predict[indices] = torch.tanh(outs[:, num_classes:]).detach().cpu()
-                    valid_conf[indices] = torch.softmax(outs[:, :num_classes], 1).detach().cpu()
+                    valid_conf_predict[indices] = torch.tanh(outs_conf).detach().cpu()
+                    valid_conf[indices] = torch.softmax(outs_cls, 1).detach().cpu()
+
+                scheduler_conf.step()
 
                 valid_acc = valid_correct / valid_total
                 ece_loss  = criterion_calibrate.forward(logits=valid_conf_predict+valid_predict, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
-                print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f} - Valid Reg Loss: {reg_loss:7.3f} - ECE Loss: {ece_loss.item():7.3f}")
+                print(f"Step [{inner_epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss:{train_loss/train_total:7.3f} - Train Acc:{train_acc:7.3f} - Valid Acc:{valid_acc:7.3f} - Valid Reg Loss:{reg_loss:7.3f} - ECE Loss: {ece_loss.item():7.3f}")
 
                 # For monitoring purpose
-                _loss_record[_count]     = float(criterion_cls(outs[:, :num_classes], labels))
+                _loss_record[_count]     = float(criterion_cls(outs_cls, labels))
                 _acc_record[_count]      = float(valid_acc)
                 _ece_record_conf[_count] = float(criterion_calibrate.forward(logits=valid_conf, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze()).item())
                 _ece_record_ours[_count] = float(ece_loss)
-                _mse_record_conf[_count] = float(criterion_l1(valid_conf, eta_tilde_valid))
-                _mse_record_ours[_count] = float(criterion_l1(valid_conf_predict+valid_predict, eta_tilde_valid))
+                _mse_record_conf[_count] = float(criterion_conf(valid_conf, eta_tilde_valid))
+                _mse_record_ours[_count] = float(criterion_conf(valid_conf_predict+valid_predict, eta_tilde_valid))
                 _count+=1
 
             if inner_epoch == CONF_RECORD_EPOCH:
@@ -323,16 +351,17 @@ def main(args):
                     if images.shape[0] == 1:
                         continue
                     images, labels = images.to(device), labels.to(device)
-                    outs = model_cls(images)
-                    _, predict = outs[:, :num_classes].max(1)
+                    outs_cls = model_cls(images)
+                    outs_conf = model_conf(images)
+                    _, predict = outs_cls.max(1)
                     correct_prediction = predict.eq(labels).float()
                     test_correct += correct_prediction.sum().item()
                     test_total += len(labels)
 
-                    test_conf[indices, :] = torch.softmax(outs[:, :num_classes], 1).detach().cpu()
+                    test_conf[indices, :] = torch.softmax(outs_cls, 1).detach().cpu()
 
                     pred_onehot = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
-                    reg_loss = criterion_conf(torch.tanh(outs[:, num_classes:]).detach().cpu()+pred_onehot, torch.tensor(eta_tilde_valid[indices]))
+                    reg_loss = criterion_conf(torch.tanh(outs_conf).detach().cpu()+pred_onehot, torch.tensor(eta_tilde_valid[indices]))
 
                 cprint(f"Classification Test Acc: {test_correct / test_total:7.3f} - Test Reg Loss: {reg_loss:7.3f}", "cyan")
 
@@ -347,15 +376,14 @@ def main(args):
             if images.shape[0] == 1:
                 continue
             images, labels = images.to(device), labels.to(device)
-            outs = model_cls(images)
-            _, predict = outs[:, :num_classes].max(1)
+            outs_cls = model_cls(images)
+            outs_conf = model_conf(images)
+            _, predict = outs_cls.max(1)
             test_correct += predict.eq(labels).sum().item()
             test_total += len(labels)
 
             test_predict[indices] = F.one_hot(predict.detach().cpu(), num_classes=num_classes).float()
-            test_conf_predict[indices] = torch.tanh(outs[:, num_classes:]).detach().cpu()
-
-            # Temperature Scaling Baseline
+            test_conf_predict[indices] = torch.tanh(outs_conf).detach().cpu()
 
         # ---------------------------------------------------- Debugging Purpose -------------------------------------------------------------
         # # Perform label correction
@@ -373,8 +401,8 @@ def main(args):
     print("Test test_confidence: ", test_conf[:5])
     print("Test test_conf_delta_pred: ", test_conf_predict[:5])
     print("Test calibrated conf: ", test_conf_predict[:5]+ test_predict[:5])
-    print("MSE - Model Conf: ", criterion_l1(test_conf, torch.tensor(eta_tilde_test)))
-    print("MSE - Ours: ", criterion_l1(test_conf_predict+test_predict, torch.tensor(eta_tilde_test)))
+    print("MSE - Model Conf: ", criterion_conf(test_conf, torch.tensor(eta_tilde_test)))
+    print("MSE - Ours: ", criterion_conf(test_conf_predict+test_predict, torch.tensor(eta_tilde_test)))
     print("ECE - Model Conf: ", criterion_calibrate.forward(logits=test_conf, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze()))
     print("ECE - Ours: ", criterion_calibrate.forward(logits=test_conf_predict+test_predict, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze()))
     print("Final Test Acc: ", test_correct/test_total*100, "%")
@@ -389,7 +417,7 @@ def main(args):
 
     fig = plt.figure(figsize=(10, 10))
     plt.subplot(2, 2, 1)
-    x_axis = np.linspace(0, N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW, int((N_EPOCH_INNER_CLS-N_EPOCH_INNER_CLS%MONITOR_WINDOW)/MONITOR_WINDOW+1))
+    x_axis = np.linspace(0, N_EPOCH_INNER_CONF-N_EPOCH_INNER_CONF%MONITOR_WINDOW, int((N_EPOCH_INNER_CONF-N_EPOCH_INNER_CONF%MONITOR_WINDOW)/MONITOR_WINDOW+1))
     plt.plot(x_axis[:-1], _loss_record[:-1], linewidth=2)
     plt.title("Loss Curve")
     plt.subplot(2, 2, 2)
@@ -404,7 +432,7 @@ def main(args):
     plt.plot(x_axis[:-1], _mse_record_conf[:-1], linewidth=2, label="Confidence")
     plt.plot(x_axis[:-1], _mse_record_ours[:-1], linewidth=2, label="Ours")
     plt.legend()
-    plt.title('L1 Curve')
+    plt.title('MSE Curve')
 
     time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d-%H-%M")
     fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_plot_{time_stamp}.png"))

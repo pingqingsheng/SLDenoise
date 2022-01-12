@@ -9,11 +9,12 @@ import gzip
 import numpy as np
 import torch
 import codecs
+import copy
 
 from utils.utils import download_url, makedir_exist_ok
 
 
-class MNIST(data.Dataset):
+class MNIST_MIXUP(data.Dataset):
     """`MNIST <http://yann.lecun.com/exdb/mnist/>`_ Dataset.
     Args:
         root (string): Root directory of dataset where ``processed/training.pt``
@@ -39,12 +40,21 @@ class MNIST(data.Dataset):
     classes = ['0 - zero', '1 - one', '2 - two', '3 - three', '4 - four',
                '5 - five', '6 - six', '7 - seven', '8 - eight', '9 - nine']
 
-    def __init__(self, root, split='train', train_ratio=0.9, transform=None, target_transform=None, download=True):
+    def __init__(self,
+                 root,
+                 split='train',
+                 train_ratio=0.9,
+                 transform=None,
+                 target_transform=None,
+                 download=True,
+                 mode="warm"):
+
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform
         self.split = split  # training set or test set
         self.train_ratio = train_ratio
+        self.mode = mode
 
         if download:
             self.download()
@@ -77,27 +87,36 @@ class MNIST(data.Dataset):
                 self.num_data = len(self.data)
         self.delta_eta = torch.zeros(len(self.targets), 10)
 
+        self.data_complete = copy.deepcopy(self.data)
+        self.targets_complete = copy.deepcopy(self.targets)
+        self.delta_eta_complete = copy.deepcopy(self.delta_eta)
 
     def __getitem__(self, index):
         """
         Args:
             index (int): Index
         Returns:
-            tuple: (image, target) where target is index of the target class.
+            tuple: (image, target, delta_eta) where target is index of the target class.
         """
         img, target, delta_eta = self.data[index], int(self.targets[index]), self.delta_eta[index]
-
         # doing this so that it is consistent with all other datasets
         # to return a PIL Image
         img = Image.fromarray(img.numpy(), mode='L')
 
-        if self.transform is not None:
-            img = self.transform(img)
+        if self.mode in ['warm', 'eval']:
+            if self.transform is not None:
+                img = self.transform(img)
+            if self.target_transform is not None:
+                target = self.target_transform(target)
+            return index, img, target, delta_eta
+        else:
+            if self.transform is not None:
+                img1 = self.transform(img)
+                img2 = self.transform(img)
+            if self.target_transform is not None:
+                target = self.target_transform(target)
+            return index, img1, img2, target, delta_eta
 
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        return index, img, target, delta_eta
 
     def __len__(self):
         return len(self.data)
@@ -179,6 +198,12 @@ class MNIST(data.Dataset):
     def set_delta_eta(self, delta_eta):
         self.delta_eta = delta_eta
 
+    def select_data(self, select_id):
+        self.data = self.data_complete[select_id]
+        self.targets = [self.targets_complete[i] for i in select_id]
+        self.delta_eta = self.delta_eta_complete[select_id]
+        self.num_data = len(self.data)
+
 
 def get_int(b):
     return int(codecs.encode(b, 'hex'), 16)
@@ -204,7 +229,7 @@ def read_image_file(path):
         return torch.from_numpy(parsed).view(length, num_rows, num_cols)
 
 
-class MNIST_Combo(MNIST):
+class MNIST_Combo(MNIST_MIXUP):
 
     def __init__(self, root, exogeneous_var, split='train', train_ratio=0.9, transform=None, target_transform=None, download=True):
         self.root = os.path.expanduser(root)
@@ -318,80 +343,8 @@ if __name__ == "__main__":
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
-    trainset = MNIST(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-    validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-    testset  = MNIST(root='./data', split="test", download=True, transform=transform_test)
-    # model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean.pth")
 
-    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    trainset = MNIST_MIXUP(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+    validset = MNIST_MIXUP(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+    testset  = MNIST_MIXUP(root='./data', split="test", download=True, transform=transform_test)
 
-    model_cls = resnet18(num_classes=10, in_channels=1)
-    model_cls = DataParallel(model_cls)
-    model_cls = model_cls.to(device)
-
-    optimizer_cls = torch.optim.Adam(model_cls.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler_cls = torch.optim.lr_scheduler.MultiStepLR(optimizer_cls, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
-
-    criterion_cls = torch.nn.CrossEntropyLoss()
-
-    for inner_epoch in range(N_EPOCH):
-        train_correct = 0
-        train_total = 0
-        train_loss = 0
-        for _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100)):
-            if images.shape[0] == 1:
-                continue
-            optimizer_cls.zero_grad()
-            images, labels = images.to(device), labels.to(device)
-            outs = model_cls(images)
-            conf = torch.softmax(outs, 1)
-            loss = criterion_cls(outs, labels)
-            loss.backward()
-            optimizer_cls.step()
-
-            train_loss += loss.detach().cpu().item()
-            _, predict = outs.max(1)
-            train_correct += predict.eq(labels).sum().item()
-            train_total += len(labels)
-
-        train_acc = train_correct / train_total
-
-        if not (inner_epoch + 1) % MONITOR_WINDOW:
-
-            valid_correct = 0
-            valid_total = 0
-            model_cls.eval()
-            for _, (indices, images, labels, _) in enumerate(tqdm(valid_loader, ascii=True, ncols=100)):
-                if images.shape[0] == 1:
-                    continue
-                images, labels = images.to(device), labels.to(device)
-                outs = model_cls(images)
-
-                _, predict = outs.max(1)
-                valid_correct += predict.eq(labels).sum().item()
-                valid_total += len(labels)
-
-            valid_acc = valid_correct / valid_total
-            print(f"Step [{inner_epoch + 1}|{N_EPOCH}] - Train Loss: {train_loss / train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc: {valid_acc:7.3f}")
-            model_cls.train()  # switch back to train mode
-        scheduler_cls.step()
-
-    # Classification Final Test
-    test_correct = 0
-    test_total = 0
-    model_cls.eval()
-    for _, (indices, images, labels, _) in enumerate(test_loader):
-        if images.shape[0] == 1:
-            continue
-        images, labels = images.to(device), labels.to(device)
-        outs = model_cls(images)
-        _, predict = outs.max(1)
-        test_correct += predict.eq(labels).sum().item()
-        test_total += len(labels)
-    cprint(f"Classification Test Acc: {test_correct / test_total:7.3f}", "cyan")
-
-    # Save clean model
-    model_file_name = "MNIST_resnet18_clean.pth"
-    torch.save(model_cls, model_file_name)

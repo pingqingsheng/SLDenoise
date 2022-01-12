@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from pytorchcv.model_provider import get_model
 import torch.nn.functional as F
+import torch.utils.model_zoo as model_zoo
 
 
 class MLP(nn.Module):
@@ -151,8 +152,7 @@ def XceptionFusion(inf_1=2048, inf_2=2048):
 
     return model
 
-import torch.nn as nn
-import torch.utils.model_zoo as model_zoo
+
 
 
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',

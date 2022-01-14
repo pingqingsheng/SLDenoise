@@ -537,7 +537,7 @@ if __name__ == "__main__":
 
     exp_config['oursv2_l1'] = []
     exp_config['oursv2_ece'] = []
-    for seed in [77]:
+    for seed in [77, 78, 79]:
         args.seed = seed
         ours_l1,  ours_ece = main(args)
         exp_config['oursv2_l1'].append(ours_l1)

@@ -110,6 +110,8 @@ def main(args):
     y_test = testset.targets
 
     cprint(">>> Inject Noise <<<", "green")
+    gpu_id_list = [int(x) for x in args.gpus.split(",")]
+    model_cls_clean = torch.nn.DataParallel(model_cls_clean, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
     _eta_train_temp_pair = [(torch.softmax(model_cls_clean(images.to(device)), 1).detach().cpu(), indices) for
                             _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100))]
     _eta_valid_temp_pair = [(torch.softmax(model_cls_clean(images.to(device)), 1).detach().cpu(), indices) for

@@ -254,11 +254,11 @@ def main(args):
             gamma_weight[indices] = gamma[indices]/gamma[indices].sum()
 
             loss_ce = (gamma_weight[indices] * criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
-            # loss_el = (1 - (q * outs_prob).sum(dim=1)).log().mean()
+            loss_el = (1 - (q * outs_prob).sum(dim=1)).log().mean()
             loss_cali = criterion_conf(torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze(), delta_prediction)
-            # loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            # loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss = loss_ce + loss_cali
+            loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
+            loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
+            loss = loss_ce + loss_en + loss_sm
             loss.backward()
             optimizer_cls.step()
 
@@ -274,7 +274,7 @@ def main(args):
         train_acc = train_correct / train_total
         # Update Gamma
         if epoch > args.warm_up:
-            current_weight_increment = min(args.gamma_initial*np.exp(epoch*args.gamma_multiplier), 20)
+            current_weight_increment = min(args.gamma_initial*np.exp(epoch*args.gamma_multiplier), 5)
         else:
             current_weight_increment = 0
         gamma[torch.where(correctness_record.bool())] += current_weight_increment
@@ -327,6 +327,7 @@ def main(args):
                 # replace corresponding element
                 valid_f_cali[indices] = prob_outs.detach().cpu().scatter_(1, predict.detach().cpu()[:, None], _valid_f_cali)
                 valid_f_cali_target_conf[indices] = _valid_f_cali.squeeze()
+                valid_correct_cali += valid_f_cali[indices].max(1)[1].eq(labels.detach().cpu()).sum().item()
 
             valid_acc_raw = valid_correct_raw/valid_total
             valid_acc_cali = valid_correct_cali/valid_total

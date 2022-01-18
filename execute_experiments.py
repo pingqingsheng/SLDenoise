@@ -86,22 +86,22 @@ def main(args):
                 if os.path.exists("./baselines"):
                     os.chdir("./baselines")
                 cmd = f"python -W ignore run_ensemble.py"+\
-                      f"--gpus {args.gpus}"+\
-                      f"--dataset {dataset}"+\
-                      f"--noise_type {noise_type}"+\
-                      f"--noise_strength {noise_strength}"+\
-                      f"--figure {bg}"
+                      f" --gpus {args.gpus}"+\
+                      f" --dataset {dataset}"+\
+                      f" --noise_type {noise_type}"+\
+                      f" --noise_strength {noise_strength}"+\
+                      f" --figure {bg}"
                 os.system(cmd)
             elif METHOD == 'cskd':
                 # # CSKD
                 if os.path.exists("./baselines"):
                     os.chdir("./baselines")
                 cmd = f"python -W ignore run_cskd.py"+\
-                      f"--gpus {args.gpus}"+\
-                      f"--dataset {dataset}"+\
-                      f"--noise_type {noise_type}"+\
-                      f"--noise_strength {noise_strength}"+ \
-                      f"--figure {bg}"
+                      f" --gpus {args.gpus}"+\
+                      f" --dataset {dataset}"+\
+                      f" --noise_type {noise_type}"+\
+                      f" --noise_strength {noise_strength}"+ \
+                      f" --figure {bg}"
                 os.system(cmd)
             else:
                 print(f"No such baseline! {METHOD}")

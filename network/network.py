@@ -2,7 +2,7 @@ import pdb
 
 import torch
 import torch.nn as nn
-from pytorchcv.model_provider import get_model
+# from pytorchcv.model_provider import get_model
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
@@ -130,27 +130,26 @@ class FCN2(torch.nn.Module):
         return self.h1(x1, x2)
 
 
-def Xception(in_f=2048):
-    model = get_model("xception", pretrained=True)
-    # model = get_model("resnet18", pretrained=True)
-    model = nn.Sequential(*list(model.children())[:-1]) # Remove original output layer
-    model[0].final_block.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
-    # model[0].final_pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
-    model = FCN(model, in_f)
-    # model[0].final_pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
-    return model
-
-
-def XceptionFusion(inf_1=2048, inf_2=2048):
-    model_face = get_model("xception", pretrained=True)
-    model_frame = get_model("xception", pretrained=True)
-    model_face = nn.Sequential(*list(model_face.children())[:-1])
-    model_frame = nn.Sequential(*list(model_frame.children())[:-1])
-    model_face[0].final_block.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
-    model_frame[0].final_block.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
-    model = FCN2(model_face, model_frame, inf_1, inf_2)
-
-    return model
+# def Xception(in_f=2048):
+#     model = get_model("xception", pretrained=True)
+#     # model = get_model("resnet18", pretrained=True)
+#     model = nn.Sequential(*list(model.children())[:-1]) # Remove original output layer
+#     model[0].final_block.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
+#     # model[0].final_pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
+#     model = FCN(model, in_f)
+#     # model[0].final_pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
+#     return model
+#
+#
+# def XceptionFusion(inf_1=2048, inf_2=2048):
+#     model_face = get_model("xception", pretrained=True)
+#     model_frame = get_model("xception", pretrained=True)
+#     model_face = nn.Sequential(*list(model_face.children())[:-1])
+#     model_frame = nn.Sequential(*list(model_frame.children())[:-1])
+#     model_face[0].final_block.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
+#     model_frame[0].final_block.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1))
+#     model = FCN2(model_face, model_frame, inf_1, inf_2)
+#     return model
 
 
 

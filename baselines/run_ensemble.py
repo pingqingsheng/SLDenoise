@@ -429,8 +429,8 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_ensemble_plot_{time_stamp}.png"))
 
-    # return _best_ensemble_l1.item(), _best_ensemble_ece.item()
-    return l1_loss_cali.item(), ece_loss_cali.item()
+    return _best_ensemble_l1.item(), _best_ensemble_ece.item()
+    # return l1_loss_cali.item(), ece_loss_cali.item()
 
 if __name__ == '__main__':
 
@@ -463,7 +463,7 @@ if __name__ == '__main__':
 
     exp_config['ensemble_l1'] = []
     exp_config['ensemble_ece'] = []
-    for seed in [77, 78, 79]:
+    for seed in [77]:
         args.seed = seed
         ours_l1,  ours_ece = main(args)
         exp_config['ensemble_l1'].append(ours_l1)
@@ -474,6 +474,7 @@ if __name__ == '__main__':
     os.makedirs(save_folder, exist_ok=True)
     save_file_name = 'ensemble_' + datetime.date.today().strftime("%d_%m_%Y") + f"_{args.seed}_{args.dataset}_{args.noise_type}_{args.noise_strength}.json"
     save_file_name = os.path.join(save_folder, save_file_name)
+    print(save_file_name)
     with open(save_file_name, "w") as f:
         json.dump(exp_config, f, sort_keys=False, indent=4)
     f.close()

@@ -401,8 +401,8 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_TS_plot_{time_stamp}.png"))
 
-    # return _best_raw_l1.item(), _best_raw_ece.item(), _best_ts_l1.item(), _best_ts_ece.item()
-    return l1_loss_raw.item(), ece_loss_raw.item(),  l1_loss_cali.item(), ece_loss_cali.item()
+    return _best_raw_l1.item(), _best_raw_ece.item(), _best_ts_l1.item(), _best_ts_ece.item()
+    # return l1_loss_raw.item(), ece_loss_raw.item(),  l1_loss_cali.item(), ece_loss_cali.item()
 
 
 class ModelWithTemperature(nn.Module):
@@ -554,7 +554,7 @@ if __name__ == "__main__":
     exp_config['naive_ece'] = []
     exp_config['ts_l1'] = []
     exp_config['ts_ece'] = []
-    for seed in [77, 77, 78]:
+    for seed in [77]:
         args.seed = seed
         naive_l1, naive_ece, ours_l1,  ours_ece = main(args)
         exp_config['naive_l1'].append(naive_l1)

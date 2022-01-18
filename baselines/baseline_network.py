@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from pytorchcv.model_provider import get_model
+# from pytorchcv.model_provider import get_model
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 

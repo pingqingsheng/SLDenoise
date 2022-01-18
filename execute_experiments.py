@@ -28,10 +28,12 @@ def main(args):
         elif METHOD == 'oursv2':
             # # ours_v1
             if dataset == 'mnist':
-                gamma_initial = 1
-                gamma_multiplier = 0.5
+                gamma_initial = 0.5
+                gamma_multiplier = 0.1
+                warm_up = 1
+                rollWindow = 1
             if dataset == 'cifar10':
-                gamma_initial = 0.1
+                gamma_initial = 0.5
                 gamma_multiplier = 0.1
                 warm_up = 20
                 rollWindow = 10

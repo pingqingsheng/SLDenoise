@@ -68,6 +68,7 @@ def main(args):
         validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
         testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 1
+        INPUT_SHAPE = 28
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
             model_cls_clean = torch.load(f"./data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth", map_location=device).module
@@ -88,6 +89,7 @@ def main(args):
         validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_test)
         testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 3
+        INPUT_SHAPE = 32
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
             model_cls_clean = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth", map_location=device).module
@@ -252,13 +254,16 @@ def main(args):
 
             delta_prediction = predict.eq(labels).float()
             gamma_weight[indices] = gamma[indices]/gamma[indices].sum()
+            _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze()
 
             loss_ce = (gamma_weight[indices] * criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
             loss_el = (1 - (q * outs_prob).sum(dim=1)).log().mean()
-            loss_cali = criterion_conf(torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze(), delta_prediction)
-            loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss = loss_ce + loss_en + loss_sm
+            loss_cali = criterion_conf(_train_f_cali, delta_prediction)
+            loss_cali_en = (_train_f_cali*torch.log(_train_f_cali)+(1-_train_f_cali)*torch.log(1-_train_f_cali)).mean()
+            # loss_cali_sm = ((1/2)*torch.log(_train_f_cali)+(1/2)*torch.log(1-_train_f_cali)).mean()
+            # loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
+            # loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
+            loss = loss_ce + loss_cali
             loss.backward()
             optimizer_cls.step()
 
@@ -321,7 +326,19 @@ def main(args):
                 valid_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
                 # We only calibrate single class and replace the predicted prob to be the calibrated prob
-                _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+                n_images = images.shape[0]
+                images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
+                images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
+                images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+                n_aug = images_aug.shape[0]
+                n_iter = np.ceil(n_aug/BATCH_SIZE)
+                _valid_f_cali = []
+                for ib in range(int(n_iter)):
+                    image_outs_raw = torch.sigmoid(model_cls(images_aug[ib*BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:, NUM_CLASSES:(NUM_CLASSES + 1)])
+                    _valid_f_cali.append(image_outs_raw.squeeze())
+                _valid_f_cali = torch.cat(_valid_f_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
+
+                # _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
                 reg_loss = criterion_l1(_valid_f_cali, torch.tensor(eta_tilde_valid[indices]).max(1)[0])
                 valid_f_raw[indices] = prob_outs.detach().cpu()
                 # replace corresponding element
@@ -375,7 +392,21 @@ def main(args):
             test_total += len(labels)
             test_f_raw[indices] = prob_outs.detach().cpu()
             test_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
-            _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+
+            n_images = images.shape[0]
+            images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
+            images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
+            images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+            n_aug = images_aug.shape[0]
+            n_iter = np.ceil(n_aug / BATCH_SIZE)
+            _test_conf_cali = []
+            for ib in range(int(n_iter)):
+                image_outs_raw = torch.sigmoid(
+                    model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:,NUM_CLASSES:(NUM_CLASSES+1)])
+                _test_conf_cali.append(image_outs_raw.squeeze())
+            _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
+
+            # _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
             test_f_raw[indices, :] = torch.softmax(outs_raw[:, :NUM_CLASSES], 1).detach().cpu()
             test_f_cali[indices, :] = test_f_raw[indices, :].scatter_(1, predict.detach().cpu()[:, None], _test_conf_cali)
             test_f_cali_target_conf[indices] = _test_conf_cali.squeeze()
@@ -442,8 +473,7 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_Oursv2_plot_{time_stamp}.png"))
 
-    # return _best_raw_l1.item(), _best_raw_ece.item(), _best_ts_l1.item(), _best_ts_ece.item()
-    return l1_loss_raw.item(), ece_loss_raw.item()
+    return l1_loss_raw.item(), ece_loss_raw.item(), l1_loss_cali.item(), ece_loss_cali.item(), _best_cali_l1, _best_cali_ece
 
 
 def sigmoid_rampup(current, rampup_length):
@@ -537,18 +567,22 @@ if __name__ == "__main__":
 
     exp_config['oursv2_l1'] = []
     exp_config['oursv2_ece'] = []
-    for seed in [77, 78, 79]:
+    exp_config['oursv2_best_l1'] = []
+    exp_config['oursv2_best_ece'] = []
+    for seed in [77]:
         args.seed = seed
-        ours_l1,  ours_ece = main(args)
+        _, _, ours_l1,  ours_ece, best_l1, best_ece = main(args)
         exp_config['oursv2_l1'].append(ours_l1)
         exp_config['oursv2_ece'].append(ours_ece)
+        exp_config['oursv2_best_l1'].append(best_l1)
+        exp_config['oursv2_best_ece'].append(best_ece)
 
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
-    save_folder = os.path.join("../exp_logs/oursv2_"+dir_date)
+    save_folder = os.path.join("./exp_logs/oursv2_"+dir_date)
     os.makedirs(save_folder, exist_ok=True)
-    print(save_folder)
-    save_file_name = 'oursv2_' + datetime.date.today().strftime("%d_%m_%Y") + f"_{args.seed}_{args.dataset}_{args.noise_type}_{args.noise_strength}.json"
+    save_file_name = 'oursweightedv2_' + datetime.date.today().strftime("%d_%m_%Y") + f"_{args.seed}_{args.dataset}_{args.noise_type}_{args.noise_strength}.json"
     save_file_name = os.path.join(save_folder, save_file_name)
+    print(save_file_name)
     with open(save_file_name, "w") as f:
         json.dump(exp_config, f, sort_keys=False, indent=4)
     f.close()

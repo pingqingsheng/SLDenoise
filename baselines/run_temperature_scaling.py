@@ -554,7 +554,7 @@ if __name__ == "__main__":
     exp_config['naive_ece'] = []
     exp_config['ts_l1'] = []
     exp_config['ts_ece'] = []
-    for seed in [77]:
+    for seed in [77, 78, 79]:
         args.seed = seed
         naive_l1, naive_ece, ours_l1,  ours_ece = main(args)
         exp_config['naive_l1'].append(naive_l1)

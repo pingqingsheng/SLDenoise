@@ -136,10 +136,12 @@ def main(args):
         eta_tilde_test  = perturb_eta(eta_test, args.noise_type, args.noise_strength)
         y_tilde_train = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_train]
         y_tilde_valid = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_valid]
+        y_tilde_test  = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_test]
         trainset.update_labels(y_tilde_train)
     elif args.noise_type=='uniform':
         y_tilde_train, P, _ = noisify_with_P(np.array(copy.deepcopy(h_star_train)), nb_classes=10, noise=args.noise_strength)
         y_tilde_valid, P, _ = noisify_with_P(np.array(copy.deepcopy(h_star_valid)), nb_classes=10, noise=args.noise_strength)
+        y_tilde_test,  P, _ = noisify_with_P(np.array(copy.deepcopy(h_star_test)), nb_classes=10, noise=args.noise_strength)
         eta_tilde_train = np.matmul(F.one_hot(h_star_train, num_classes=10), P)
         eta_tilde_valid = np.matmul(F.one_hot(h_star_valid, num_classes=10), P)
         eta_tilde_test  = np.matmul(F.one_hot(h_star_test, num_classes=10), P)
@@ -148,9 +150,11 @@ def main(args):
         if args.dataset == "mnist":
             y_tilde_train, P, _ = noisify_mnist_asymmetric(np.array(copy.deepcopy(h_star_train)), noise=args.noise_strength)
             y_tilde_valid, P, _ = noisify_mnist_asymmetric(np.array(copy.deepcopy(h_star_valid)), noise=args.noise_strength)
+            y_tilde_test,  P, _ = noisify_mnist_asymmetric(np.array(copy.deepcopy(h_star_test)),  noise=args.noise_strength)
         elif args.dataset == 'cifar10':
-            y_tilde_train, P, _ = noisify_cifar10_asymmetric(np.array(copy.deepcopy(h_star_train)),noise=args.noise_strength)
-            y_tilde_valid, P, _ = noisify_mnist_asymmetric(np.array(copy.deepcopy(h_star_valid)), noise=args.noise_strength)
+            y_tilde_train, P, _ = noisify_cifar10_asymmetric(np.array(copy.deepcopy(h_star_train)), noise=args.noise_strength)
+            y_tilde_valid, P, _ = noisify_cifar10_asymmetric(np.array(copy.deepcopy(h_star_valid)), noise=args.noise_strength)
+            y_tilde_test,  P, _ = noisify_cifar10_asymmetric(np.array(copy.deepcopy(h_star_test)),  noise=args.noise_strength)
         eta_tilde_train = np.matmul(F.one_hot(h_star_train, num_classes=10), P)
         eta_tilde_valid = np.matmul(F.one_hot(h_star_valid, num_classes=10), P)
         eta_tilde_test  = np.matmul(F.one_hot(h_star_test, num_classes=10), P)
@@ -161,6 +165,7 @@ def main(args):
         eta_tilde_test  = copy.deepcopy(eta_test)
         y_tilde_train = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_train]
         y_tilde_valid = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_valid]
+        y_tilde_test  = [int(np.where(np.random.multinomial(1, x, 1).squeeze())[0]) for x in eta_tilde_test]
         trainset.update_labels(y_tilde_train)
 
     validset_noise = copy.deepcopy(validset)
@@ -320,8 +325,8 @@ def main(args):
 
             valid_acc_raw = valid_correct_raw/valid_total
             valid_acc_cali = valid_correct_cali/valid_total
-            ece_loss_raw = criterion_calibrate.forward(logits=valid_f_raw, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
-            ece_loss_cali = criterion_calibrate.forward(logits=valid_f_cali, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
+            ece_loss_raw = criterion_calibrate.forward(logits=valid_f_raw, labels=torch.tensor(y_tilde_valid))
+            ece_loss_cali = criterion_calibrate.forward(logits=valid_f_cali, labels=torch.tensor(y_tilde_valid))
             l1_loss_raw = criterion_l1(valid_f_raw_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
             l1_loss_cali = criterion_l1(valid_f_cali_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
 
@@ -377,8 +382,8 @@ def main(args):
 
             test_acc_raw = test_correct_raw/test_total
             test_acc_cali = test_correct_cali/test_total
-            ece_loss_raw = criterion_calibrate.forward(logits=test_f_raw, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
-            ece_loss_cali = criterion_calibrate.forward(logits=test_f_cali, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
+            ece_loss_raw = criterion_calibrate.forward(logits=test_f_raw, labels=torch.tensor(y_tilde_test))
+            ece_loss_cali = criterion_calibrate.forward(logits=test_f_cali, labels=torch.tensor(y_tilde_test))
             l1_loss_raw = criterion_l1(test_f_raw_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
             l1_loss_cali = criterion_l1(test_f_cali_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
 

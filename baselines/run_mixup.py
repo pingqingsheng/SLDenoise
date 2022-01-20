@@ -17,6 +17,8 @@ from tqdm import tqdm
 import copy
 from termcolor import cprint
 import datetime
+# import torch.multiprocessing
+# torch.multiprocessing.set_sharing_strategy('file_system')
 
 from data.MNIST_MIXUP import MNIST_MIXUP
 from data.CIFAR_MIXUP import CIFAR10_MIXUP
@@ -31,6 +33,7 @@ ALPHA :float = 4
 LAMBDA_U:float = 25
 P_THRESH:float = 0.5
 T:float = 0.5
+EPS:float = 1e-7
 # General set-up
 TRAIN_VALIDATION_RATIO: float = 0.8
 N_EPOCH_OUTER: int = 1
@@ -105,13 +108,13 @@ def main(args):
             model_cls_clean = torch.load("../data/CIFAR10_resnet18_clean.pth", map_location=DEVICE).module
 
     # mixup-specific
-    train_loader_warmup = DataLoader(copy.deepcopy(trainset_warm), batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    train_loader_labeled = DataLoader(copy.deepcopy(trainset_labeled), batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    train_loader_unlabeled = DataLoader(copy.deepcopy(trainset_unlabeled), batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    train_loader_warmup = DataLoader(copy.deepcopy(trainset_warm), batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
+    train_loader_labeled = DataLoader(copy.deepcopy(trainset_labeled), batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
+    train_loader_unlabeled = DataLoader(copy.deepcopy(trainset_unlabeled), batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
     validset_noise = copy.deepcopy(validset)
-    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
+    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
 
     # Inject noise here
     y_train = copy.deepcopy(trainset_warm.targets)
@@ -205,16 +208,11 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset_warm) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls_1 = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
+    model_cls_1 = resnet18(num_classes=NUM_CLASSES+1, in_channels=INPUT_CHANNEL)
     model_cls_1 = DataParallel(model_cls_1)
-    model_cls_2 = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
+    model_cls_2 = resnet18(num_classes=NUM_CLASSES+1, in_channels=INPUT_CHANNEL)
     model_cls_2 = DataParallel(model_cls_2)
     model_cls_1, model_cls_2 = model_cls_1.to(DEVICE), model_cls_2.to(DEVICE)
-
-    # TODO: add calibration model here
-    # model_cls_cali = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
-    # model_cls_cali = DataParallel(model_cls_cali)
-    # model_cls_cali = model_cls_cali.to(DEVICE)
 
     optimizer_1 = torch.optim.SGD(model_cls_1.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, momentum=0.9, nesterov=True)
     scheduler_1 = torch.optim.lr_scheduler.MultiStepLR(optimizer_1, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
@@ -222,6 +220,7 @@ def main(args):
     scheduler_2 = torch.optim.lr_scheduler.MultiStepLR(optimizer_2, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
 
     criterion_ce = torch.nn.CrossEntropyLoss()
+    criterion_conf = torch.nn.MSELoss()
     criterion_mixmatch = SemiLoss()
     criterion_calibrate = ECELoss()
     criterion_l1 = torch.nn.L1Loss()
@@ -243,49 +242,80 @@ def main(args):
     _l1_cali_record = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS - N_EPOCH_INNER_CLS % MONITOR_WINDOW, int(
         (N_EPOCH_INNER_CLS - N_EPOCH_INNER_CLS % MONITOR_WINDOW) / MONITOR_WINDOW + 1))))
     _count = 0
-    _best_raw_l1 = np.inf
+    _best_raw_l1  = np.inf
     _best_raw_ece = np.inf
-    _best_ts_l1 = np.inf
-    _best_ts_ece = np.inf
+    _best_cali_l1  = np.inf
+    _best_cali_ece = np.inf
+    _best_raw_acc  = 0
+    _best_cali_acc = 0
     loss_1_record = torch.zeros(len(trainset_warm))
     loss_2_record = torch.zeros(len(trainset_warm))
     gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
 
     for epoch in range(N_EPOCH_INNER_CLS):
 
+        train_correct = 0
+        train_total = 0
+
         # Warm-up and record loss
         cprint(f">>>Epoch [{epoch + 1}|{N_EPOCH_INNER_CLS}] Training <<<", "green")
         model_cls_1.train()
         model_cls_2.train()
+
         for ib, (indices, images, labels, _) in enumerate(tqdm(train_loader_warmup, ascii=True, ncols=100)):
             if images.shape[0] == 1:
                 continue
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outs_1 = model_cls_1(images)
             outs_2 = model_cls_2(images)
-            loss_1 = criterion_ce(outs_1, labels)
-            loss_2 = criterion_ce(outs_2, labels)
-            penalty_1 = criterion_asy(outs_1) if args.noise_type == 'asymmetric' else 0
-            penalty_2 = criterion_asy(outs_2) if args.noise_type == 'asymmetric' else 0
-            loss_1_record[indices] = loss_1.detach().cpu() + penalty_1
-            loss_2_record[indices] = loss_2.detach().cpu() + penalty_2
-            loss = loss_1+loss_2
+            loss_1 = criterion_ce(outs_1[:, :NUM_CLASSES], labels)
+            loss_2 = criterion_ce(outs_2[:, :NUM_CLASSES], labels)
+            loss = loss_1 + loss_2
+            penalty_1 = criterion_asy(outs_1[:, :NUM_CLASSES]).detach().cpu() if args.noise_type == 'asymmetric' else 0
+            penalty_2 = criterion_asy(outs_2[:, :NUM_CLASSES]).detach().cpu() if args.noise_type == 'asymmetric' else 0
+
+            prob = (torch.softmax(outs_1[:, :NUM_CLASSES], 1) + torch.softmax(outs_2[:, :NUM_CLASSES], 1))/2
+            _, pred = prob.max(1)
+            train_correct += pred.eq(labels).sum().item()
+            train_total += len(labels)
+
             if epoch < args.warm_up:
                 optimizer_1.zero_grad()
                 optimizer_2.zero_grad()
-                loss_1.backward()
-                loss_2.backward()
+                (loss_1+penalty_1).backward()
+                (loss_2+penalty_2).backward()
                 optimizer_1.step()
                 optimizer_2.step()
+
+            if args.calibration_mode:
+                # Only use calibration to help selection data (not affect the training)
+                with torch.no_grad():
+                    # calibrate model 1
+                    _train_f_cali_1 = torch.sigmoid(outs_1[:, NUM_CLASSES:])
+                    _prob_outs = torch.softmax(outs_1[:, :NUM_CLASSES], 1)
+                    _, predict = _prob_outs.max(1)
+                    _prob_outs = (1 - _train_f_cali_1) * _prob_outs / (_prob_outs.sum(1) - _prob_outs.max(1)[0] + EPS).unsqueeze(1)
+                    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _train_f_cali_1)
+                    loss_1 = -(torch.nn.functional.one_hot(labels, NUM_CLASSES) * torch.log(_prob_outs + EPS)).sum(1)
+                    # calibrate model 2
+                    _train_f_cali_2 = torch.sigmoid(outs_2[:, NUM_CLASSES:])
+                    _prob_outs = torch.softmax(outs_2[:, :NUM_CLASSES], 1)
+                    _, predict = _prob_outs.max(1)
+                    _prob_outs = (1 - _train_f_cali_2) * _prob_outs / (_prob_outs.sum(1) - _prob_outs.max(1)[0] + EPS).unsqueeze(1)
+                    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _train_f_cali_2)
+                    loss_2 = -(torch.nn.functional.one_hot(labels, NUM_CLASSES) * torch.log(_prob_outs + EPS)).sum(1)
+
+            loss_1_record[indices] = loss_1.detach().cpu() + penalty_1
+            loss_2_record[indices] = loss_2.detach().cpu() + penalty_2
 
         # Select data
         loss_1_record = (loss_1_record - min(loss_1_record))/(max(loss_1_record)-min(loss_1_record))
         loss_2_record = (loss_2_record - min(loss_2_record))/(max(loss_2_record)-min(loss_2_record))
-        gmm.fit(loss_1_record.unsqueeze(1).numpy())
-        prob_1 = gmm.predict_proba(loss_1_record.unsqueeze(1).numpy())
+        gmm.fit(loss_1_record.unsqueeze(1).detach().numpy())
+        prob_1 = gmm.predict_proba(loss_1_record.unsqueeze(1).detach().numpy())
         prob_1 = prob_1[:, gmm.means_.argmin()]
-        gmm.fit(loss_2_record.unsqueeze(1).numpy())
-        prob_2 = gmm.predict_proba(loss_2_record.unsqueeze(1).numpy())
+        gmm.fit(loss_2_record.unsqueeze(1).detach().numpy())
+        prob_2 = gmm.predict_proba(loss_2_record.unsqueeze(1).detach().numpy())
         prob_2 = prob_2[:, gmm.means_.argmin()]
         pred_1 = (prob_1 > P_THRESH)
         pred_2 = (prob_2 > P_THRESH)
@@ -294,8 +324,8 @@ def main(args):
         label_correctness = (torch.tensor(y_tilde_train).squeeze() == torch.tensor(h_star_train).squeeze()).long()
         ind1 = torch.from_numpy(pred_1).squeeze()
         ind2 = torch.from_numpy(pred_2).squeeze()
-        print(f"Net1 selection total {sum(pred_1)} - precision {sum(label_correctness[ind1])/ind1.sum():.3f} - recall {sum(label_correctness[ind1])/label_correctness.sum():.3f}")
-        print(f"Net2 selection total {sum(pred_2)} - precision {sum(label_correctness[ind2])/ind2.sum():.3f} - recall {sum(label_correctness[ind2])/label_correctness.sum():.3f}")
+        # print(f"Net1 selection total {sum(pred_1)} - precision {sum(label_correctness[ind1])/ind1.sum():.3f} - recall {sum(label_correctness[ind1])/label_correctness.sum():.3f}")
+        # print(f"Net2 selection total {sum(pred_2)} - precision {sum(label_correctness[ind2])/ind2.sum():.3f} - recall {sum(label_correctness[ind2])/label_correctness.sum():.3f}")
 
         if epoch > args.warm_up:
             # Training model 1 with divide and mix
@@ -312,7 +342,11 @@ def main(args):
                     indices_u, images_u1, images_u2, _, _ = train_loader_unlabeled_iter.next()
                 except:
                     # If unlabeled set runs out of data then reset the loader
-                    train_loader_unlabeled_iter = iter(DataLoader(trainset_unlabeled, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed)))
+                    train_loader_unlabeled_iter = iter(DataLoader(trainset_unlabeled,
+                                                                  batch_size=BATCH_SIZE,
+                                                                  shuffle=True,
+                                                                  num_workers=1,
+                                                                  worker_init_fn=_init_fn(worker_id=seed)))
                     indices_u, images_u1, images_u2, _, _ = train_loader_unlabeled_iter.next()
 
                 common_num = min(images_x1.shape[0], images_u1.shape[0])
@@ -329,15 +363,17 @@ def main(args):
                     outputs_u12 = model_cls_1(images_u2)
                     outputs_u21 = model_cls_2(images_u1)
                     outputs_u22 = model_cls_2(images_u2)
-                    pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) +
-                          torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1))/4
+                    pu = (torch.softmax(outputs_u11[:, :NUM_CLASSES], dim=1) + torch.softmax(outputs_u12[:, :NUM_CLASSES], dim=1) +
+                          torch.softmax(outputs_u21[:, :NUM_CLASSES], dim=1) + torch.softmax(outputs_u22[:, :NUM_CLASSES], dim=1))/4
+                    # TODO: may add our calibration here
                     ptu = pu ** (1 / T)  # temparature sharpening
                     targets_u = ptu / ptu.sum(dim=1, keepdim=True)  # normalize
                     targets_u = targets_u.detach()
                     # label refinement of labeled samples
                     outputs_x1 = model_cls_1(images_x1)
                     outputs_x2 = model_cls_1(images_x2)
-                    px = (torch.softmax(outputs_x1, dim=1) + torch.softmax(outputs_x2, dim=1)) / 2
+                    px = (torch.softmax(outputs_x1[:, :NUM_CLASSES], dim=1) + torch.softmax(outputs_x2[:, :NUM_CLASSES], dim=1))/2
+                    # TODO: can add our calibration here also
                     px = w_x.unsqueeze(1) * labels_onehot + (1 - w_x.unsqueeze(1)) * px
                     ptx = px ** (1 / T)  # temparature sharpening
                     targets_x = ptx / ptx.sum(dim=1, keepdim=True)  # normalize
@@ -354,25 +390,23 @@ def main(args):
                 mixed_input = l * input_a + (1 - l) * input_b
                 mixed_target = l * target_a + (1 - l) * target_b
                 logits = model_cls_1(mixed_input)
-                logits_x = logits[:common_num*2]
-                logits_u = logits[common_num*2:]
+                logits_x = logits[:common_num*2, :NUM_CLASSES]
+                logits_u = logits[common_num*2:, :NUM_CLASSES]
 
-                Lx, Lu, lamb = criterion_mixmatch(logits_x,
-                                                  mixed_target[:common_num * 2],
+                Lx, Lu, lamb = criterion_mixmatch(logits_x, mixed_target[:common_num * 2],
                                                   logits_u, mixed_target[common_num * 2:],
                                                   epoch + ib/num_iter,
                                                   args.warm_up)
                 # regularization
                 prior = torch.ones(NUM_CLASSES)/NUM_CLASSES
                 prior = prior.cuda()
-                pred_mean = torch.softmax(logits, dim=1).mean(0)
+                pred_mean = torch.softmax(logits[:, :NUM_CLASSES], dim=1).mean(0)
                 penalty = torch.sum(prior*torch.log(prior/pred_mean))
                 loss = Lx + lamb * Lu  + penalty
                 # compute gradient and do SGD step
                 optimizer_1.zero_grad()
                 loss.backward()
                 optimizer_1.step()
-
             scheduler_1.step()
 
             # Training model 2 with divide and mix
@@ -389,7 +423,11 @@ def main(args):
                     indices_u, images_u1, images_u2, _, _ = train_loader_unlabeled_iter.next()
                 except:
                     # If unlabeled set runs out of data then reset the loader
-                    train_loader_unlabeled_iter = iter(DataLoader(trainset_unlabeled, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed)))
+                    train_loader_unlabeled_iter = iter(DataLoader(trainset_unlabeled,
+                                                                  batch_size=BATCH_SIZE,
+                                                                  shuffle=True,
+                                                                  num_workers=1,
+                                                                  worker_init_fn=_init_fn(worker_id=seed)))
                     indices_u, images_u1, images_u2, _, _ = train_loader_unlabeled_iter.next()
 
                 common_num = min(images_x1.shape[0], images_u1.shape[0])
@@ -406,15 +444,17 @@ def main(args):
                     outputs_u12 = model_cls_1(images_u2)
                     outputs_u21 = model_cls_2(images_u1)
                     outputs_u22 = model_cls_2(images_u2)
-                    pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) +
-                          torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1))/4
+                    pu = (torch.softmax(outputs_u11[:, :NUM_CLASSES], dim=1) + torch.softmax(outputs_u12[:, :NUM_CLASSES], dim=1) +
+                          torch.softmax(outputs_u21[:, :NUM_CLASSES], dim=1) + torch.softmax(outputs_u22[:, :NUM_CLASSES], dim=1))/4
+                    # TODO: can calibration here
                     ptu = pu ** (1 / T)  # temparature sharpening
                     targets_u = ptu / ptu.sum(dim=1, keepdim=True)  # normalize
                     targets_u = targets_u.detach()
                     # label refinement of labeled samples
                     outputs_x1 = model_cls_2(images_x1)
                     outputs_x2 = model_cls_2(images_x2)
-                    px = (torch.softmax(outputs_x1, dim=1) + torch.softmax(outputs_x2, dim=1)) / 2
+                    # TODO: can also add calibration here
+                    px = (torch.softmax(outputs_x1[:, :NUM_CLASSES], dim=1) + torch.softmax(outputs_x2[:, :NUM_CLASSES], dim=1)) / 2
                     px = w_x.unsqueeze(1) * labels_onehot + (1 - w_x.unsqueeze(1)) * px
                     ptx = px ** (1 / T)  # temparature sharpening
                     targets_x = ptx / ptx.sum(dim=1, keepdim=True)  # normalize
@@ -431,18 +471,17 @@ def main(args):
                 mixed_input = l * input_a + (1 - l) * input_b
                 mixed_target = l * target_a + (1 - l) * target_b
                 logits = model_cls_2(mixed_input)
-                logits_x = logits[:common_num*2]
-                logits_u = logits[common_num*2:]
+                logits_x = logits[:common_num*2, :NUM_CLASSES]
+                logits_u = logits[common_num*2:, :NUM_CLASSES]
 
-                Lx, Lu, lamb = criterion_mixmatch(logits_x,
-                                                  mixed_target[:common_num * 2],
+                Lx, Lu, lamb = criterion_mixmatch(logits_x, mixed_target[:common_num * 2],
                                                   logits_u, mixed_target[common_num * 2:],
                                                   epoch + ib/num_iter,
                                                   args.warm_up)
                 # regularization
                 prior = torch.ones(NUM_CLASSES)/NUM_CLASSES
                 prior = prior.cuda()
-                pred_mean = torch.softmax(logits, dim=1).mean(0)
+                pred_mean = torch.softmax(logits[:, :NUM_CLASSES], dim=1).mean(0)
                 penalty = torch.sum(prior*torch.log(prior/pred_mean))
                 loss = Lx + lamb * Lu  + penalty
                 # compute gradient and do SGD step
@@ -475,7 +514,7 @@ def main(args):
                 outs_2 = model_cls_2(images)
                 # Raw model result record
                 outs = outs_1+outs_2
-                prob_outs = torch.softmax(outs, 1)
+                prob_outs = torch.softmax(outs[:, :NUM_CLASSES], 1)
                 _, predict = prob_outs.max(1)
                 correct_prediction = predict.eq(labels).float()
                 valid_correct_raw += correct_prediction.sum().item()
@@ -483,31 +522,35 @@ def main(args):
                 valid_f_raw[indices] = prob_outs.detach().cpu()
                 valid_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
-                # Calibrated model result record
-                # prob_outs = torch.softmax(outs_cali, 1)
-                # _, predict = prob_outs.max(1)
-                # correct_prediction = predict.eq(labels).float()
-                # valid_correct_cali += correct_prediction.sum().item()
-                # valid_f_cali[indices] = prob_outs.detach().cpu()
-                # valid_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                if args.calibration_mode:
+                    with torch.no_grad():
+                        # Calibrated model result record
+                        _valid_f_cali = torch.sigmoid(outs_1[:, NUM_CLASSES:]+outs_2[:, NUM_CLASSES:])
+                        _prob_outs = (1 - _valid_f_cali)*prob_outs/(prob_outs.sum(1) - prob_outs.max(1)[0] + EPS).unsqueeze(1)
+                        _prob_outs = _prob_outs.scatter_(1, predict[:, None], _valid_f_cali)
+                        _, pred = _prob_outs.max(1)
+                        valid_correct_cali += pred.eq(labels).sum().item()
+                        valid_f_cali[indices] = _prob_outs.detach().cpu()
+                        valid_f_cali_target_conf[indices] = _valid_f_cali.detach().cpu().squeeze()
 
             valid_acc_raw = valid_correct_raw/valid_total
             valid_acc_cali = valid_correct_cali/valid_total
             ece_loss_raw = criterion_calibrate.forward(logits=valid_f_raw, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
-            #ece_loss_cali = criterion_calibrate.forward(logits=valid_f_cali, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
+            ece_loss_cali = criterion_calibrate.forward(logits=valid_f_cali, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
             l1_loss_raw = criterion_l1(valid_f_raw_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
-            #l1_loss_cali = criterion_l1(valid_f_cali_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
+            l1_loss_cali = criterion_l1(valid_f_cali_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
+
             # print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {valid_acc_raw:7.3f} - Valid Acc Cali: {valid_acc_cali:7.3f}")
             # print(f"ECE Raw: {ece_loss_raw.item()} - ECE Cali: {ece_loss_cali.item()} - L1 Loss: {l1_loss_raw.item()} - L1 Loss: {l1_loss_cali.item()}")
 
             # For monitoring purpose
             _loss_record[_count] = float(loss.item()/len(trainset_warm))
             _valid_acc_raw_record[_count] = float(valid_acc_raw)
-            # _valid_acc_cali_record[_count] = float(valid_acc_cali)
+            _valid_acc_cali_record[_count] = float(valid_acc_cali)
             _ece_raw_record[_count] = float(ece_loss_raw)
-            # _ece_cali_record[_count] = float(ece_loss_cali.item())
+            _ece_cali_record[_count] = float(ece_loss_cali.item())
             _l1_raw_record[_count] = float(l1_loss_raw)
-            # _l1_cali_record[_count] = float(l1_loss_cali.item())
+            _l1_cali_record[_count] = float(l1_loss_cali.item())
             _count += 1
 
             # Testing stage
@@ -533,7 +576,7 @@ def main(args):
 
                 # Raw model result record
                 outs = outs_1 + outs_2
-                prob_outs = torch.softmax(outs, 1)
+                prob_outs = torch.softmax(outs[:, :NUM_CLASSES], 1)
                 _, predict = prob_outs.max(1)
                 correct_prediction = predict.eq(labels).float()
                 test_correct_raw += correct_prediction.sum().item()
@@ -541,20 +584,23 @@ def main(args):
                 test_f_raw[indices] = prob_outs.detach().cpu()
                 test_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
-                # Calibrated model result record
-                # prob_outs = torch.softmax(outs_cali, 1)
-                # _, predict = prob_outs.max(1)
-                # correct_prediction = predict.eq(labels).float()
-                # test_correct_cali += correct_prediction.sum().item()
-                # test_f_cali[indices] = prob_outs.detach().cpu()
-                # test_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                if args.calibration_mode:
+                    with torch.no_grad():
+                        # Calibrated model result record
+                        _test_f_cali = torch.sigmoid(outs_1[:, NUM_CLASSES:]+outs_2[:, NUM_CLASSES:])
+                        _prob_outs = (1-_test_f_cali)*prob_outs/(prob_outs.sum(1) - prob_outs.max(1)[0] + EPS).unsqueeze(1)
+                        _prob_outs = _prob_outs.scatter_(1, predict[:, None], _test_f_cali)
+                        _, pred = _prob_outs.max(1)
+                        test_correct_cali += pred.eq(labels).sum().item()
+                        test_f_cali[indices] = _prob_outs.detach().cpu()
+                        test_f_cali_target_conf[indices] = _test_f_cali.detach().cpu().squeeze()
 
             test_acc_raw = test_correct_raw/test_total
-            # test_acc_cali = test_correct_cali/test_total
+            test_acc_cali = test_correct_cali/test_total
             ece_loss_raw = criterion_calibrate.forward(logits=test_f_raw, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
-            # ece_loss_cali = criterion_calibrate.forward(logits=test_f_cali, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
+            ece_loss_cali = criterion_calibrate.forward(logits=test_f_cali, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
             l1_loss_raw = criterion_l1(test_f_raw_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
-            # l1_loss_cali = criterion_l1(test_f_cali_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
+            l1_loss_cali = criterion_l1(test_f_cali_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
 
             if  ece_loss_raw < _best_raw_ece:
                 _best_raw_ece = ece_loss_raw
@@ -562,19 +608,22 @@ def main(args):
             if l1_loss_raw < _best_raw_l1:
                 _best_raw_l1 = l1_loss_raw
                 _best_raw_l1_epoch = epoch
-            # if ece_loss_cali < _best_ts_ece:
-            #     _best_ts_ece = ece_loss_cali
-            #     _best_ts_ece_epoch = epoch
-            # if l1_loss_cali < _best_ts_l1:
-            #     _best_ts_l1 = l1_loss_cali
-            #     _best_ts_l1_epoch = epoch
+            if ece_loss_cali < _best_cali_ece:
+                _best_cali_ece = ece_loss_cali
+                _best_cali_ece_epoch = epoch
+            if l1_loss_cali < _best_cali_l1:
+                _best_cali_l1 = l1_loss_cali
+                _best_cali_l1_epoch = epoch
+            if test_acc_raw > _best_raw_acc:
+                _best_raw_acc = test_acc_raw
+                _best_raw_acc_epoch = epoch
+            if test_acc_cali > _best_cali_acc:
+                _best_cali_acc = test_acc_cali
+                _best_cali_acc_epoch = epoch
 
-            # print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {test_acc_raw:7.3f} - Valid Acc Cali: {test_acc_cali:7.3f}")
-            # print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - ECE Cali: {ece_loss_cali.item():.3f}/{_best_ts_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_ts_ece_epoch}")
-            # print(f"L1 Raw: {l1_loss_raw.item():.3f}/{_best_raw_l1.item():.3f} - L1 Cali: {l1_loss_cali.item():.3f}/{_best_ts_l1.item():.3f} - Best L1 Raw: {_best_raw_l1_epoch} - Best L1 Cali: {_best_ts_l1_epoch}")
-            print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {loss.item():.3f} - Valid Acc Raw: {valid_acc_raw:.3f} - Test Acc Raw: {test_acc_raw:.3f}")
-            print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch}")
-            print(f"L1 Raw: {l1_loss_raw.item():.3f}/{_best_raw_l1.item():.3f} - Best L1 Epoch: {_best_raw_l1_epoch}")
+            print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {loss.item():7.3f} - Train Acc: {train_correct/train_total:7.3f} - Valid Acc Raw: {test_acc_raw:7.3f} - Valid Acc Cali: {test_acc_cali:7.3f}")
+            print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - ECE Cali: {ece_loss_cali.item():.3f}/{_best_cali_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_cali_ece_epoch}")
+            print(f"L1 Raw: {l1_loss_raw.item():.3f}/{_best_raw_l1.item():.3f} - L1 Cali: {l1_loss_cali.item():.3f}/{_best_cali_l1.item():.3f} - Best L1 Raw: {_best_raw_l1_epoch} - Best L1 Cali: {_best_cali_l1_epoch}")
 
 
     if args.figure:
@@ -607,8 +656,10 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_MixUp_plot_{time_stamp}.png"))
 
-    return _best_raw_l1.item(), _best_raw_ece.item()
-    # return l1_loss_raw, ece_loss_raw
+    if args.calibration_mode:
+        return  _best_cali_l1.item(), _best_cali_ece.item(), _best_cali_acc
+    else:
+        return _best_raw_l1.item(), _best_raw_ece.item(), _best_raw_acc
 
 
 def linear_rampup(current, warm_up, rampup_length=16):
@@ -628,8 +679,7 @@ class SemiLoss(object):
 class NegEntropy(object):
     def __call__(self,outputs):
         probs = torch.softmax(outputs, dim=1)
-        return torch.mean(torch.sum(probs.log()*probs, dim=1))
-
+        return torch.mean(torch.sum((probs+EPS).log()*probs, dim=1))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
@@ -657,15 +707,32 @@ if __name__ == "__main__":
     exp_config['monitor_window'] = MONITOR_WINDOW
     exp_config['record_freq'] = CONF_RECORD_EPOCH
     for k, v in args._get_kwargs():
+        if k == 'seed':
+            continue
         exp_config[k] = v
 
-    exp_config['mixup_l1'] = []
-    exp_config['mixup_ece'] = []
+    exp_config['raw_l1'] = []
+    exp_config['raw_ece'] = []
+    exp_config['raw_acc'] = []
+    exp_config['cali_l1'] = []
+    exp_config['cali_ece'] = []
+    exp_config['cali_acc'] = []
+    exp_config['seed'] = []
     for seed in [77]:
         args.seed = seed
-        ours_l1,  ours_ece = main(args)
-        exp_config['mixup_l1'].append(ours_l1)
-        exp_config['mixup_ece'].append(ours_ece)
+        args.calibration_mode = False
+        raw_l1, raw_ece, raw_acc = main(args)
+        exp_config['raw_l1'].append(raw_l1)
+        exp_config['raw_ece'].append(raw_ece)
+        exp_config['raw_acc'].append(raw_acc)
+        args.calibration_mode = True
+        cali_l1, cali_ece, cali_acc = main(args)
+        exp_config['cali_l1'].append(cali_l1)
+        exp_config['cali_ece'].append(cali_ece)
+        exp_config['cali_acc'].append(cali_acc)
+        exp_config['seed'].append(seed)
+    print(f"Final Raw Acc  {raw_acc:.3f}\t L1 {raw_l1:.3f}\t ECE {raw_ece:.3f}")
+    print(f"Final Cali Acc {cali_acc:.3f}\t L1 {cali_l1:.3f}\t ECE {cali_ece:.3f}")
 
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
     save_folder = os.path.join("../exp_logs/mixup_"+dir_date)

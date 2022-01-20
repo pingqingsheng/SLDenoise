@@ -68,7 +68,6 @@ def main(args):
         testset = MNIST(root="../data", split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 1
         NUM_CLASSES = 10
-        INIT_EPOCH = 0
         if args.noise_type == 'idl':
             model_cls_clean = torch.load(f"../data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
         else:
@@ -89,7 +88,6 @@ def main(args):
         testset  = CIFAR10(root='../data', split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 3
         NUM_CLASSES = 10
-        INIT_EPOCH = 20
         if args.noise_type == 'idl':
             model_cls_clean = torch.load(f"../data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
         else:
@@ -189,23 +187,17 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls_1 = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
+    model_cls_1 = resnet18(num_classes=NUM_CLASSES+1, in_channels=INPUT_CHANNEL)
     model_cls_1 = DataParallel(model_cls_1)
-    model_cls_2 = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
+    model_cls_2 = resnet18(num_classes=NUM_CLASSES+1, in_channels=INPUT_CHANNEL)
     model_cls_2 = DataParallel(model_cls_2)
     model_cls_1, model_cls_2 = model_cls_1.to(DEVICE), model_cls_2.to(DEVICE)
-
-    # TODO: add calibration model here
-    # model_cls_cali = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
-    # model_cls_cali = DataParallel(model_cls_cali)
-    # model_cls_cali = model_cls_cali.to(DEVICE)
 
     optimizer_1 = torch.optim.SGD(model_cls_1.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, momentum=0.9, nesterov=True)
     scheduler_1 = torch.optim.lr_scheduler.MultiStepLR(optimizer_1, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
     optimizer_2 = torch.optim.SGD(model_cls_2.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, momentum=0.9, nesterov=True)
     scheduler_2 = torch.optim.lr_scheduler.MultiStepLR(optimizer_2, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
 
-    criterion_cls = torch.nn.CrossEntropyLoss()
     criterion_calibrate = ECELoss()
     criterion_l1 = torch.nn.L1Loss()
 
@@ -227,8 +219,10 @@ def main(args):
     _count = 0
     _best_raw_l1 = np.inf
     _best_raw_ece = np.inf
-    _best_ts_l1 = np.inf
-    _best_ts_ece = np.inf
+    _best_cali_l1 = np.inf
+    _best_cali_ece = np.inf
+    _best_raw_acc = 0
+    _best_cali_acc = 0
 
     # give it additional information for now
     forget_rate = args.noise_strength
@@ -256,11 +250,18 @@ def main(args):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outs_1 = model_cls_1(images)
             outs_2 = model_cls_2(images)
-            # TODO: add calibration here
-            if epoch < INIT_EPOCH:
-                loss_1, loss_2 = loss_coteaching(outs_1, outs_2, labels, forget_rate)
+
+            if args.calibration_mode:
+                if epoch < args.warm_up:
+                    loss_1, loss_2 = loss_coteaching_calibrated(outs_1, outs_2, labels, forget_rate)
+                else:
+                    loss_1, loss_2 = loss_coteaching_plus_calibrated(outs_1, outs_2, labels, forget_rate, epoch*ib)
             else:
-                loss_1, loss_2 = loss_coteaching_plus(outs_1, outs_2, labels, forget_rate, epoch*ib)
+                if epoch < args.warm_up:
+                    loss_1, loss_2 = loss_coteaching(outs_1, outs_2, labels, forget_rate)
+                else:
+                    loss_1, loss_2 = loss_coteaching_plus(outs_1, outs_2, labels, forget_rate, epoch*ib)
+
             loss_1.backward()
             optimizer_1.step()
             loss_2.backward()
@@ -310,8 +311,8 @@ def main(args):
                 outs_2 = model_cls_2(images)
 
                 # Raw model result record
-                prob_outs_1 = torch.softmax(outs_1, 1)
-                prob_outs_2 = torch.softmax(outs_2, 1)
+                prob_outs_1 = torch.softmax(outs_1[:, :NUM_CLASSES], 1)
+                prob_outs_2 = torch.softmax(outs_2[:, :NUM_CLASSES], 1)
                 _, predict_1 = prob_outs_1.max(1)
                 _, predict_2 = prob_outs_2.max(1)
                 correct_prediction_1 = predict_1.eq(labels).float()
@@ -325,13 +326,28 @@ def main(args):
                 valid_f_raw_1_target_conf[indices] = prob_outs_1.max(1)[0].detach().cpu()
                 valid_f_raw_2_target_conf[indices] = prob_outs_2.max(1)[0].detach().cpu()
 
-                # Calibrated model result record
-                # prob_outs = torch.softmax(outs_cali, 1)
-                # _, predict = prob_outs.max(1)
-                # correct_prediction = predict.eq(labels).float()
-                # valid_correct_cali += correct_prediction.sum().item()
-                # valid_f_cali[indices] = prob_outs.detach().cpu()
-                # valid_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                if args.calibration_mode:
+                    # Calibrated model result record
+                    _valid_f_cali_1 = torch.sigmoid(outs_1[:, NUM_CLASSES:])
+                    _prob_outs = torch.softmax(outs_1[:, :NUM_CLASSES], 1)
+                    _, predict = _prob_outs.max(1)
+                    _prob_outs = (1 - _valid_f_cali_1)*_prob_outs/(_prob_outs.sum(1) - _prob_outs.max(1)[0]).unsqueeze(1)
+                    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _valid_f_cali_1)
+                    _, pred = _prob_outs.max(1)
+                    valid_correct_cali_1 += pred.eq(labels).sum().item()
+                    valid_f_cali_1[indices] = _prob_outs.detach().cpu()
+                    valid_f_cali_1_target_conf[indices] = _valid_f_cali_1.detach().cpu().squeeze()
+
+                    _valid_f_cali_2 = torch.sigmoid(outs_2[:, NUM_CLASSES:])
+                    _prob_outs = torch.softmax(outs_2[:, :NUM_CLASSES], 1)
+                    _, predict = _prob_outs.max(1)
+                    _prob_outs = (1 - _valid_f_cali_2) * _prob_outs/(_prob_outs.sum(1) - _prob_outs.max(1)[0]).unsqueeze(1)
+                    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _valid_f_cali_2)
+                    _loss_2_cali = -(torch.nn.functional.one_hot(labels, NUM_CLASSES) * torch.log(_prob_outs)).mean()
+                    _, pred = _prob_outs.max(1)
+                    valid_correct_cali_2 += pred.eq(labels).sum().item()
+                    valid_f_cali_2[indices] = _prob_outs.detach().cpu()
+                    valid_f_cali_2_target_conf[indices] = _valid_f_cali_2.detach().cpu().squeeze()
 
             valid_acc_raw_1 = valid_correct_raw_1/valid_total
             valid_acc_raw_2 = valid_correct_raw_2/valid_total
@@ -339,21 +355,24 @@ def main(args):
             valid_acc_cali_2 = valid_correct_cali_2/valid_total
             ece_loss_raw_1 = criterion_calibrate.forward(logits=valid_f_raw_1, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
             ece_loss_raw_2 = criterion_calibrate.forward(logits=valid_f_raw_2, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
-            #ece_loss_cali = criterion_calibrate.forward(logits=valid_f_cali, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
+            ece_loss_cali_1 = criterion_calibrate.forward(logits=valid_f_cali_1, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
+            ece_loss_cali_2 = criterion_calibrate.forward(logits=valid_f_cali_2, labels=torch.tensor(eta_tilde_valid).argmax(1).squeeze())
             l1_loss_raw_1 = criterion_l1(valid_f_raw_1_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
             l1_loss_raw_2 = criterion_l1(valid_f_raw_2_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
-            #l1_loss_cali = criterion_l1(valid_f_cali_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
+            l1_loss_cali_1 = criterion_l1(valid_f_cali_1_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
+            l1_loss_cali_2 = criterion_l1(valid_f_cali_2_target_conf, torch.tensor(eta_tilde_valid).max(1)[0])
+
             # print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {valid_acc_raw:7.3f} - Valid Acc Cali: {valid_acc_cali:7.3f}")
             # print(f"ECE Raw: {ece_loss_raw.item()} - ECE Cali: {ece_loss_cali.item()} - L1 Loss: {l1_loss_raw.item()} - L1 Loss: {l1_loss_cali.item()}")
 
             # For monitoring purpose
             _loss_record[_count] = float(min(train_loss_1, train_loss_2)/train_total)
             _valid_acc_raw_record[_count] = float(max(valid_acc_raw_1, valid_acc_raw_2))
-            # _valid_acc_cali_record[_count] = float(valid_acc_cali)
+            _valid_acc_cali_record[_count] = float(max(valid_acc_cali_1, valid_acc_cali_2))
             _ece_raw_record[_count] = float(min(ece_loss_raw_1.item(), ece_loss_raw_2.item()))
-            # _ece_cali_record[_count] = float(ece_loss_cali.item())
+            _ece_cali_record[_count] = float(min(ece_loss_cali_1.item(), ece_loss_cali_2.item()))
             _l1_raw_record[_count] = float(min(l1_loss_raw_1.item(), l1_loss_raw_2.item()))
-            # _l1_cali_record[_count] = float(l1_loss_cali.item())
+            _l1_cali_record[_count] = float(min(l1_loss_cali_1.item(), l1_loss_cali_2.item()))
             _count += 1
 
             # Testing stage
@@ -384,8 +403,8 @@ def main(args):
                 outs_2 = model_cls_2(images)
 
                 # Raw model result record
-                prob_outs_1 = torch.softmax(outs_1, 1)
-                prob_outs_2 = torch.softmax(outs_2, 1)
+                prob_outs_1 = torch.softmax(outs_1[:, :NUM_CLASSES], 1)
+                prob_outs_2 = torch.softmax(outs_2[:, :NUM_CLASSES], 1)
                 _, predict_1 = prob_outs_1.max(1)
                 _, predict_2 = prob_outs_2.max(1)
                 correct_prediction_1 = predict_1.eq(labels).float()
@@ -399,46 +418,69 @@ def main(args):
                 test_f_raw_1_target_conf[indices] = prob_outs_1.max(1)[0].detach().cpu()
                 test_f_raw_2_target_conf[indices] = prob_outs_2.max(1)[0].detach().cpu()
 
-                # Calibrated model result record
-                # prob_outs = torch.softmax(outs_cali, 1)
-                # _, predict = prob_outs.max(1)
-                # correct_prediction = predict.eq(labels).float()
-                # test_correct_cali += correct_prediction.sum().item()
-                # test_f_cali[indices] = prob_outs.detach().cpu()
-                # test_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                if args.calibration_mode:
+                    # Calibrated model result record
+                    _test_f_cali_1 = torch.sigmoid(outs_1[:, NUM_CLASSES:])
+                    _prob_outs = torch.softmax(outs_1[:, :NUM_CLASSES], 1)
+                    _, predict = _prob_outs.max(1)
+                    _prob_outs = (1 - _test_f_cali_1)*_prob_outs/(_prob_outs.sum(1) - _prob_outs.max(1)[0]).unsqueeze(1)
+                    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _test_f_cali_1)
+                    _, pred = _prob_outs.max(1)
+                    test_correct_cali_1 += pred.eq(labels).sum().item()
+                    test_f_cali_1[indices] = _prob_outs.detach().cpu()
+                    test_f_cali_1_target_conf[indices] = _test_f_cali_1.detach().cpu().squeeze()
+
+                    _test_f_cali_2 = torch.sigmoid(outs_2[:, NUM_CLASSES:])
+                    _prob_outs = torch.softmax(outs_2[:, :NUM_CLASSES], 1)
+                    _, predict = _prob_outs.max(1)
+                    _prob_outs = (1 - _test_f_cali_2)*_prob_outs/(_prob_outs.sum(1) - _prob_outs.max(1)[0]).unsqueeze(1)
+                    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _test_f_cali_2)
+                    _, pred = _prob_outs.max(1)
+                    test_correct_cali_2 += pred.eq(labels).sum().item()
+                    test_f_cali_2[indices] = _prob_outs.detach().cpu()
+                    test_f_cali_2_target_conf[indices] = _test_f_cali_2.detach().cpu().squeeze()
 
             test_acc_raw_1 = test_correct_raw_1/test_total
             test_acc_raw_2 = test_correct_raw_2/test_total
-            # test_acc_cali = test_correct_cali/test_total
+            test_acc_cali_1 = test_correct_cali_1/test_total
+            test_acc_cali_2 = test_correct_cali_2/test_total
             ece_loss_raw_1 = criterion_calibrate.forward(logits=test_f_raw_1, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
             ece_loss_raw_2 = criterion_calibrate.forward(logits=test_f_raw_2, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
-            # ece_loss_cali = criterion_calibrate.forward(logits=test_f_cali, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
+            ece_loss_cali_1 = criterion_calibrate.forward(logits=test_f_cali_1, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
+            ece_loss_cali_2 = criterion_calibrate.forward(logits=test_f_cali_2, labels=torch.tensor(eta_tilde_test).argmax(1).squeeze())
             l1_loss_raw_1 = criterion_l1(test_f_raw_1_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
             l1_loss_raw_2 = criterion_l1(test_f_raw_2_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
-            # l1_loss_cali = criterion_l1(test_f_cali_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
+            l1_loss_cali_1 = criterion_l1(test_f_cali_1_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
+            l1_loss_cali_2 = criterion_l1(test_f_cali_2_target_conf, torch.tensor(eta_tilde_test).max(1)[0])
 
+            test_acc_raw = max(test_acc_raw_1, test_acc_raw_2)
+            test_acc_cali = max(test_acc_cali_1, test_acc_cali_2)
             ece_loss_raw = min(ece_loss_raw_1.item(), ece_loss_raw_2.item())
             l1_loss_raw  = min(l1_loss_raw_1.item(), l1_loss_raw_2.item())
+            ece_loss_cali = min(ece_loss_cali_1.item(), ece_loss_cali_2.item())
+            l1_loss_cali = min(l1_loss_cali_1.item(), l1_loss_cali_2.item())
             if  ece_loss_raw < _best_raw_ece:
                 _best_raw_ece = ece_loss_raw
                 _best_raw_ece_epoch = epoch
             if l1_loss_raw < _best_raw_l1:
                 _best_raw_l1 = l1_loss_raw
                 _best_raw_l1_epoch = epoch
-            # if ece_loss_cali < _best_ts_ece:
-            #     _best_ts_ece = ece_loss_cali
-            #     _best_ts_ece_epoch = epoch
-            # if l1_loss_cali < _best_ts_l1:
-            #     _best_ts_l1 = l1_loss_cali
-            #     _best_ts_l1_epoch = epoch
+            if ece_loss_cali < _best_cali_ece:
+                _best_cali_ece = ece_loss_cali
+                _best_cali_ece_epoch = epoch
+            if l1_loss_cali < _best_cali_l1:
+                _best_cali_l1 = l1_loss_cali
+                _best_cali_l1_epoch = epoch
+            if test_acc_raw > _best_raw_acc:
+                _best_raw_acc = test_acc_raw
+                _best_raw_acc_epoch = epoch
+            if test_acc_cali > _best_cali_acc:
+                _best_cali_acc = test_acc_cali
+                _best_cali_acc_epoch = epoch
 
-            # print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {test_acc_raw:7.3f} - Valid Acc Cali: {test_acc_cali:7.3f}")
-            # print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - ECE Cali: {ece_loss_cali.item():.3f}/{_best_ts_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_ts_ece_epoch}")
-            # print(f"L1 Raw: {l1_loss_raw.item():.3f}/{_best_raw_l1.item():.3f} - L1 Cali: {l1_loss_cali.item():.3f}/{_best_ts_l1.item():.3f} - Best L1 Raw: {_best_raw_l1_epoch} - Best L1 Cali: {_best_ts_l1_epoch}")
-            print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {min(test_acc_raw_1, test_acc_raw_2):7.3f}")
-            print(f"ECE Raw: {ece_loss_raw:.3f}/{_best_raw_ece:.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch}")
-            print(f"L1 Raw: {l1_loss_raw:.3f}/{_best_raw_l1:.3f} - Best L1 Epoch: {_best_raw_l1_epoch}")
-
+            print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {test_acc_raw:7.3f} - Valid Acc Cali: {test_acc_cali:7.3f}")
+            print(f"ECE Raw: {ece_loss_raw:.3f}/{_best_raw_ece:.3f} - ECE Cali: {ece_loss_cali:.3f}/{_best_cali_ece:.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_cali_ece_epoch}")
+            print(f"L1 Raw: {l1_loss_raw:.3f}/{_best_raw_l1:.3f} - L1 Cali: {l1_loss_cali:.3f}/{_best_cali_l1:.3f} - Best L1 Raw: {_best_raw_l1_epoch} - Best L1 Cali: {_best_cali_l1_epoch}")
 
     if args.figure:
         import matplotlib
@@ -470,8 +512,10 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_CoteachingPlus_plot_{time_stamp}.png"))
 
-    # return _best_raw_l1.item(), _best_raw_ece.item()
-    return l1_loss_raw, ece_loss_raw
+    if args.calibration_mode:
+        return  _best_cali_l1, _best_cali_ece, _best_cali_acc
+    else:
+        return _best_raw_l1, _best_raw_ece, _best_raw_acc
 
 
 # define drop rate schedule
@@ -484,10 +528,9 @@ def gen_forget_rate(forget_rate):
 # Co-Teaching+ Loss functions
 def loss_coteaching(outs_1, outs_2, labels, forget_rate):
 
-    loss_1 = F.cross_entropy(outs_1, labels, reduction='none').flatten()
+    loss_1 = F.cross_entropy(outs_1[:, :NUM_CLASSES], labels, reduction='none').flatten()
     ind_1_sorted = loss_1.argsort()
-
-    loss_2 = F.cross_entropy(outs_2, labels, reduction='none').flatten()
+    loss_2 = F.cross_entropy(outs_2[:, :NUM_CLASSES], labels, reduction='none').flatten()
     ind_2_sorted = loss_2.argsort()
 
     remember_rate = 1 - forget_rate
@@ -501,16 +544,15 @@ def loss_coteaching(outs_1, outs_2, labels, forget_rate):
         ind_2_update = ind_2_sorted
         num_remember = ind_1_update.shape[0]
 
-    loss_1_update = F.cross_entropy(outs_1[ind_2_update], labels[ind_2_update])
-    loss_2_update = F.cross_entropy(outs_2[ind_1_update], labels[ind_1_update])
+    loss_1_update = F.cross_entropy(outs_1[ind_2_update, :NUM_CLASSES], labels[ind_2_update])
+    loss_2_update = F.cross_entropy(outs_2[ind_1_update, :NUM_CLASSES], labels[ind_1_update])
 
     return torch.sum(loss_1_update)/num_remember, torch.sum(loss_2_update)/num_remember
 
-
 def loss_coteaching_plus(outs_1, outs_2, labels, forget_rate, step):
 
-    _, pred1 = torch.max(outs_1.data, 1)
-    _, pred2 = torch.max(outs_2.data, 1)
+    _, pred1 = torch.max(outs_1.data[:, :NUM_CLASSES], 1)
+    _, pred2 = torch.max(outs_2.data[:, :NUM_CLASSES], 1)
 
     with torch.no_grad():
         logical_disagree_vec = (pred1!=pred2)
@@ -526,13 +568,71 @@ def loss_coteaching_plus(outs_1, outs_2, labels, forget_rate, step):
         update_labels = labels
         update_outs1 = outs_1
         update_outs2 = outs_2
-        cross_entropy_1 = F.cross_entropy(update_outs1, update_labels)
-        cross_entropy_2 = F.cross_entropy(update_outs2, update_labels)
+        cross_entropy_1 = F.cross_entropy(update_outs1[:, :NUM_CLASSES], update_labels)
+        cross_entropy_2 = F.cross_entropy(update_outs2[:, :NUM_CLASSES], update_labels)
         loss_1 = torch.sum(update_step * cross_entropy_1) / labels.size()[0]
         loss_2 = torch.sum(update_step * cross_entropy_2) / labels.size()[0]
 
     return loss_1, loss_2
 
+def loss_coteaching_calibrated(outs_1, outs_2, labels, forget_rate):
+
+    _train_f_cali_1 = torch.sigmoid(outs_1[:, NUM_CLASSES:])
+    _prob_outs = torch.softmax(outs_1[:, :NUM_CLASSES], 1)
+    _, predict = _prob_outs.max(1)
+    _prob_outs = (1 - _train_f_cali_1) * _prob_outs / (_prob_outs.sum(1) - _prob_outs.max(1)[0]).unsqueeze(1)
+    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _train_f_cali_1)
+    _loss_1_cali = -(torch.nn.functional.one_hot(labels, NUM_CLASSES)*torch.log(_prob_outs)).mean(1)
+    ind_1_sorted = _loss_1_cali.argsort()
+
+    _train_f_cali_2 = torch.sigmoid(outs_2[:, NUM_CLASSES:])
+    _prob_outs = torch.softmax(outs_2[:, :NUM_CLASSES], 1)
+    _, predict = _prob_outs.max(1)
+    _prob_outs = (1 - _train_f_cali_2) * _prob_outs / (_prob_outs.sum(1) - _prob_outs.max(1)[0]).unsqueeze(1)
+    _prob_outs = _prob_outs.scatter_(1, predict[:, None], _train_f_cali_2)
+    _loss_2_cali = -(torch.nn.functional.one_hot(labels, NUM_CLASSES)*torch.log(_prob_outs)).mean(1)
+    ind_2_sorted = _loss_2_cali.argsort()
+
+    remember_rate = 1 - forget_rate
+    num_remember = int(remember_rate * len(labels))
+
+    ind_1_update = ind_1_sorted[:num_remember]
+    ind_2_update = ind_2_sorted[:num_remember]
+    if len(ind_1_update) == 0:
+        ind_1_update = ind_1_sorted
+        ind_2_update = ind_2_sorted
+        num_remember = ind_1_update.shape[0]
+
+    loss_1_update = F.cross_entropy(outs_1[ind_2_update, :NUM_CLASSES], labels[ind_2_update])
+    loss_2_update = F.cross_entropy(outs_2[ind_1_update, :NUM_CLASSES], labels[ind_1_update])
+
+    return torch.sum(loss_1_update)/num_remember, torch.sum(loss_2_update)/num_remember
+
+def loss_coteaching_plus_calibrated(outs_1, outs_2, labels, forget_rate, step):
+
+    _, pred1 = torch.max(outs_1.data[:, :NUM_CLASSES], 1)
+    _, pred2 = torch.max(outs_2.data[:, :NUM_CLASSES], 1)
+
+    with torch.no_grad():
+        logical_disagree_vec = (pred1!=pred2)
+        disagree_id = torch.where(logical_disagree_vec)[0]
+        update_step = torch.logical_or(logical_disagree_vec, (step < 5000)*torch.ones(len(logical_disagree_vec)).to(DEVICE).long())
+
+    if len(disagree_id) > 0:
+        update_labels = labels[disagree_id]
+        update_outs1 = outs_1[disagree_id]
+        update_outs2 = outs_2[disagree_id]
+        loss_1, loss_2 = loss_coteaching_calibrated(update_outs1, update_outs2, update_labels, forget_rate)
+    else:
+        update_labels = labels
+        update_outs1 = outs_1
+        update_outs2 = outs_2
+        cross_entropy_1 = F.cross_entropy(update_outs1[:, :NUM_CLASSES], update_labels)
+        cross_entropy_2 = F.cross_entropy(update_outs2[:, :NUM_CLASSES], update_labels)
+        loss_1 = torch.sum(update_step * cross_entropy_1) / labels.size()[0]
+        loss_2 = torch.sum(update_step * cross_entropy_2) / labels.size()[0]
+
+    return loss_1, loss_2
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
@@ -546,6 +646,7 @@ if __name__ == "__main__":
     parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
     parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
     parser.add_argument("--figure", action='store_true', help='True to plot performance log')
+    parser.add_argument("--calibration_mode", action="store_true", help="True to use calibration")
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
 
@@ -560,15 +661,32 @@ if __name__ == "__main__":
     exp_config['monitor_window'] = MONITOR_WINDOW
     exp_config['record_freq'] = CONF_RECORD_EPOCH
     for k, v in args._get_kwargs():
+        if k == 'seed':
+            continue
         exp_config[k] = v
 
-    exp_config['coteachingplus_l1'] = []
-    exp_config['coteachingplus_ece'] = []
+    exp_config['raw_l1'] = []
+    exp_config['raw_ece'] = []
+    exp_config['raw_acc'] = []
+    exp_config['cali_l1'] = []
+    exp_config['cali_ece'] = []
+    exp_config['cali_acc'] = []
+    exp_config['seed'] = []
     for seed in [77]:
         args.seed = seed
-        ours_l1,  ours_ece = main(args)
-        exp_config['coteachingplus_l1'].append(ours_l1)
-        exp_config['coteachingplus_ece'].append(ours_ece)
+        args.calibration_mode = False
+        raw_l1, raw_ece, raw_acc = main(args)
+        exp_config['raw_l1'].append(raw_l1)
+        exp_config['raw_ece'].append(raw_ece)
+        exp_config['raw_acc'].append(raw_acc)
+        args.calibration_mode = True
+        cali_l1, cali_ece, cali_acc = main(args)
+        exp_config['cali_l1'].append(cali_l1)
+        exp_config['cali_ece'].append(cali_ece)
+        exp_config['cali_acc'].append(cali_acc)
+        exp_config['seed'].append(seed)
+    print(f"Final Raw Acc  {raw_acc:.3f}\t L1 {raw_l1:.3f}\t ECE {raw_ece:.3f}")
+    print(f"Final Cali Acc {cali_acc:.3f}\t L1 {cali_l1:.3f}\t ECE {cali_ece:.3f}")
 
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
     save_folder = os.path.join("../exp_logs/coteachingplus_"+dir_date)

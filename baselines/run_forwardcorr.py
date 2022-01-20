@@ -187,17 +187,14 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
+    model_cls = resnet18(num_classes=NUM_CLASSES+1, in_channels=INPUT_CHANNEL)
     model_cls = DataParallel(model_cls)
     model_cls = model_cls.to(DEVICE)
-    model_cls_cali = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
-    model_cls_cali = DataParallel(model_cls_cali)
-    model_cls_cali = model_cls_cali.to(DEVICE)
 
     optimizer_cls = torch.optim.SGD(model_cls.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, momentum=0.9, nesterov=True)
     scheduler_cls = torch.optim.lr_scheduler.MultiStepLR(optimizer_cls, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
 
-    criterion_cls = torch.nn.CrossEntropyLoss()
+    criterion_conf = torch.nn.MSELoss()
     criterion_calibrate = ECELoss()
     criterion_l1 = torch.nn.L1Loss()
 
@@ -219,15 +216,16 @@ def main(args):
     _count = 0
     _best_raw_l1 = np.inf
     _best_raw_ece = np.inf
-    _best_ts_l1 = np.inf
-    _best_ts_ece = np.inf
+    _best_cali_l1 = np.inf
+    _best_cali_ece = np.inf
+    _best_raw_acc = 0
+    _best_cali_acc = 0
     eta_corr = torch.zeros(len(trainset), NUM_CLASSES)
     T_hat = torch.eye(NUM_CLASSES).to(DEVICE)
 
     for epoch in range(N_EPOCH_INNER_CLS):
 
         cprint(f">>>Epoch [{epoch + 1}|{N_EPOCH_INNER_CLS}] Training <<<", "green")
-
         train_correct = 0
         train_total = 0
         train_loss = 0
@@ -239,11 +237,17 @@ def main(args):
             optimizer_cls.zero_grad()
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outs = model_cls(images)
-            probs = torch.softmax(outs, 1)
-            _, predict = outs[:, :NUM_CLASSES].max(1)
+            prob_outs = torch.softmax(outs[:, :NUM_CLASSES], 1)
+            _, predict = prob_outs.max(1)
+
+            delta_prediction = predict.eq(labels).float()
+            _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze()
+
             # Forward Correction
             labels_onehot = torch.nn.functional.one_hot(labels, NUM_CLASSES)
-            loss = -(labels_onehot*torch.log(torch.matmul(probs, T_hat))).mean()
+            loss_forward = -(labels_onehot*torch.log(torch.matmul(prob_outs, T_hat))).mean()
+            loss_cali    = criterion_conf(_train_f_cali.squeeze(), delta_prediction.squeeze())
+            loss = loss_forward + loss_cali
             loss.backward()
             optimizer_cls.step()
 
@@ -251,10 +255,15 @@ def main(args):
             train_correct += predict.eq(labels).sum().item()
             train_total += len(labels)
 
-            if epoch == args.warm_up-1:
-                eta_corr[indices] = torch.softmax(outs, 1).detach().cpu()
+            if epoch == args.warm_up-1 and args.calibration_mode:
+                predict = predict
+                _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:])
+                prob_outs = (1-_train_f_cali) * prob_outs/(prob_outs.sum(1) - prob_outs.max(1)[0]).unsqueeze(1)
+                prob_outs = prob_outs.scatter_(1, predict[:, None], _train_f_cali)
+                eta_corr[indices] = prob_outs.detach().cpu()
+            elif epoch == args.warm_up-1 and not args.calibration_mode:
+                eta_corr[indices] = prob_outs.detach().cpu()
 
-        # TODO: add calibration loss here
         if epoch == args.warm_up:
             with torch.no_grad():
                 T_hat = estimate_transition_mat(eta_corr).to(DEVICE)
@@ -267,7 +276,6 @@ def main(args):
             valid_correct_raw = 0
             valid_correct_cali = 0
             valid_total = 0
-
             # For ECE
             valid_f_raw = torch.zeros(len(validset), NUM_CLASSES).float()
             valid_f_cali = torch.zeros(len(validset), NUM_CLASSES).float()
@@ -276,16 +284,14 @@ def main(args):
             valid_f_cali_target_conf = torch.zeros(len(validset)).float()
 
             model_cls.eval()
-            model_cls_cali.eval()
             for _, (indices, images, labels, _) in enumerate(tqdm(valid_loader, ascii=True, ncols=100)):
                 if images.shape[0] == 1:
                     continue
                 images, labels = images.to(DEVICE), labels.to(DEVICE)
                 outs_raw = model_cls(images)
-                outs_cali = model_cls_cali(images)
 
                 # Raw model result record
-                prob_outs = torch.softmax(outs_raw, 1)
+                prob_outs = torch.softmax(outs_raw[:, :NUM_CLASSES], 1)
                 _, predict = prob_outs.max(1)
                 correct_prediction = predict.eq(labels).float()
                 valid_correct_raw += correct_prediction.sum().item()
@@ -294,12 +300,15 @@ def main(args):
                 valid_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
                 # Calibrated model result record
-                prob_outs = torch.softmax(outs_cali, 1)
-                _, predict = prob_outs.max(1)
-                correct_prediction = predict.eq(labels).float()
-                valid_correct_cali += correct_prediction.sum().item()
-                valid_f_cali[indices] = prob_outs.detach().cpu()
-                valid_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                if args.calibration_mode:
+                    _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:])
+                    prob_outs = (1-_valid_f_cali) * prob_outs/(prob_outs.sum(1) - prob_outs.max(1)[0]).unsqueeze(1)
+                    prob_outs = prob_outs.scatter_(1, predict[:, None], _valid_f_cali)
+                    _, predict = prob_outs.max(1)
+                    correct_prediction = predict.eq(labels).float()
+                    valid_correct_cali += correct_prediction.sum().item()
+                    valid_f_cali[indices] = prob_outs.detach().cpu()
+                    valid_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
             valid_acc_raw = valid_correct_raw/valid_total
             valid_acc_cali = valid_correct_cali/valid_total
@@ -334,16 +343,14 @@ def main(args):
             test_f_cali_target_conf = torch.zeros(len(testset)).float()
 
             model_cls.eval()
-            model_cls_cali.eval()
             for _, (indices, images, labels, _) in enumerate(tqdm(test_loader, ascii=True, ncols=100)):
                 if images.shape[0] == 1:
                     continue
                 images, labels = images.to(DEVICE), labels.to(DEVICE)
                 outs_raw = model_cls(images)
-                outs_cali = model_cls_cali(images)
 
                 # Raw model result record
-                prob_outs = torch.softmax(outs_raw, 1)
+                prob_outs = torch.softmax(outs_raw[:, :NUM_CLASSES], 1)
                 _, predict = prob_outs.max(1)
                 correct_prediction = predict.eq(labels).float()
                 test_correct_raw += correct_prediction.sum().item()
@@ -352,12 +359,15 @@ def main(args):
                 test_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
                 # Calibrated model result record
-                prob_outs = torch.softmax(outs_cali, 1)
-                _, predict = prob_outs.max(1)
-                correct_prediction = predict.eq(labels).float()
-                test_correct_cali += correct_prediction.sum().item()
-                test_f_cali[indices] = prob_outs.detach().cpu()
-                test_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                if args.calibration_mode:
+                    _test_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:])
+                    prob_outs = (1-_test_f_cali)*prob_outs/(prob_outs.sum(1)-prob_outs.max(1)[0]).unsqueeze(1)
+                    prob_outs = prob_outs.scatter_(1, predict[:, None], _test_f_cali)
+                    _, predict = prob_outs.max(1)
+                    correct_prediction = predict.eq(labels).float()
+                    test_correct_cali += correct_prediction.sum().item()
+                    test_f_cali[indices] = prob_outs.detach().cpu()
+                    test_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
             test_acc_raw = test_correct_raw/test_total
             test_acc_cali = test_correct_cali/test_total
@@ -372,16 +382,22 @@ def main(args):
             if l1_loss_raw < _best_raw_l1:
                 _best_raw_l1 = l1_loss_raw
                 _best_raw_l1_epoch = epoch
-            if ece_loss_cali < _best_ts_ece:
-                _best_ts_ece = ece_loss_cali
-                _best_ts_ece_epoch = epoch
-            if l1_loss_cali < _best_ts_l1:
-                _best_ts_l1 = l1_loss_cali
-                _best_ts_l1_epoch = epoch
+            if ece_loss_cali < _best_cali_ece:
+                _best_cali_ece = ece_loss_cali
+                _best_cali_ece_epoch = epoch
+            if l1_loss_cali < _best_cali_l1:
+                _best_cali_l1 = l1_loss_cali
+                _best_cali_l1_epoch = epoch
+            if test_acc_raw > _best_raw_acc:
+                _best_raw_acc = test_acc_raw
+                _best_raw_acc_epoch = epoch
+            if test_acc_cali > _best_cali_acc:
+                _best_cali_acc = test_acc_cali
+                _best_cali_acc_epoch = epoch
 
             print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {test_acc_raw:7.3f} - Valid Acc Cali: {test_acc_cali:7.3f}")
-            print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - ECE Cali: {ece_loss_cali.item():.3f}/{_best_ts_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_ts_ece_epoch}")
-            print(f"L1 Raw: {l1_loss_raw.item():.3f}/{_best_raw_l1.item():.3f} - L1 Cali: {l1_loss_cali.item():.3f}/{_best_ts_l1.item():.3f} - Best L1 Raw: {_best_raw_l1_epoch} - Best L1 Cali: {_best_ts_l1_epoch}")
+            print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - ECE Cali: {ece_loss_cali.item():.3f}/{_best_cali_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_cali_ece_epoch}")
+            print(f"L1 Raw: {l1_loss_raw.item():.3f}/{_best_raw_l1.item():.3f} - L1 Cali: {l1_loss_cali.item():.3f}/{_best_cali_l1.item():.3f} - Best L1 Raw: {_best_raw_l1_epoch} - Best L1 Cali: {_best_cali_l1_epoch}")
 
     if args.figure:
         import matplotlib
@@ -413,9 +429,10 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_Forward_plot_{time_stamp}.png"))
 
-    # return _best_raw_l1.item(), _best_raw_ece.item()
-    return l1_loss_cali.item(), ece_loss_cali.item()
-
+    if args.calibration_mode:
+        return  _best_cali_l1.item(), _best_cali_ece.item(), _best_cali_acc
+    else:
+        return _best_raw_l1.item(), _best_raw_ece.item(), _best_raw_acc
 
 def estimate_transition_mat(eta_corr: torch.tensor, \
                             row_normalize = True,\
@@ -459,6 +476,7 @@ if __name__ == "__main__":
     parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
     parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
     parser.add_argument("--figure", action='store_true', help='True to plot performance log')
+    parser.add_argument("--calibration_mode", action='store_true', help='True to use calibration')
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
 
@@ -473,15 +491,33 @@ if __name__ == "__main__":
     exp_config['monitor_window'] = MONITOR_WINDOW
     exp_config['record_freq'] = CONF_RECORD_EPOCH
     for k, v in args._get_kwargs():
+        if k == 'seed':
+            continue
         exp_config[k] = v
 
-    exp_config['forward_l1'] = []
-    exp_config['forward_ece'] = []
-    for seed in [77, 78, 79]:
+    exp_config['raw_l1'] = []
+    exp_config['raw_ece'] = []
+    exp_config['raw_acc'] = []
+    exp_config['cali_l1'] = []
+    exp_config['cali_ece'] = []
+    exp_config['cali_acc'] = []
+    exp_config['seed'] = []
+    for seed in [77]:
         args.seed = seed
-        ours_l1,  ours_ece = main(args)
-        exp_config['forward_l1'].append(ours_l1)
-        exp_config['forward_ece'].append(ours_ece)
+        args.calibration_mode = False
+        raw_l1, raw_ece, raw_acc = main(args)
+        exp_config['raw_l1'].append(raw_l1)
+        exp_config['raw_ece'].append(raw_ece)
+        exp_config['raw_acc'].append(raw_acc)
+        args.calibration_mode = True
+        cali_l1, cali_ece, cali_acc = main(args)
+        exp_config['cali_l1'].append(cali_l1)
+        exp_config['cali_ece'].append(cali_ece)
+        exp_config['cali_acc'].append(cali_acc)
+        exp_config['seed'].append(seed)
+    print("\n")
+    print(f"Final Raw Acc  {raw_acc:.3f}\t L1 {raw_l1:.3f}\t ECE {raw_ece:.3f}")
+    print(f"Final Cali Acc {cali_acc:.3f}\t L1 {cali_l1:.3f}\t ECE {cali_ece:.3f}")
 
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
     save_folder = os.path.join("../exp_logs/forward_"+dir_date)

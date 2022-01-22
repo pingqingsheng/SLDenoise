@@ -435,7 +435,7 @@ def main(args):
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
+    parser = argparse.ArgumentParser(description="Argudement for SLDenoise")
     parser.add_argument("--seed", type=int, help="Random seed for the experiment", default=80)
     parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='0')
     parser.add_argument("--dataset", type=str, help="Experiment Dataset", default='mnist',

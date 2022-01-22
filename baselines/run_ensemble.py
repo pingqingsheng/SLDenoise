@@ -10,6 +10,7 @@ import pdb
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from torch.nn import DataParallel
 import torch.nn.functional as F
 import numpy as np
 import argparse
@@ -53,7 +54,7 @@ def main(args):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True  # need to set to True as well
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f"cuda:0" if torch.cuda.is_available() else 'cpu')
 
     # Data Loading and Processing
     if args.dataset == 'mnist':
@@ -65,16 +66,16 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
-        trainset = MNIST(root="../data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
-        validset = MNIST(root="../data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-        testset = MNIST(root="../data", split="test", download=True, transform=transform_test)
+        trainset = MNIST(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
+        validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
+        testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 1
-        IMG_SIZE = 28
+        INPUT_SHAPE = 28
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"../data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load(f"./data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
         else:
-            model_cls_clean = torch.load("../data/MNIST_resnet18_clean.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load("./data/MNIST_resnet18_clean.pth")
     elif args.dataset == 'cifar10':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -86,16 +87,16 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-        trainset = CIFAR10(root="../data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        validset = CIFAR10(root="../data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        testset  = CIFAR10(root='../data', split="test", download=True, transform=transform_test)
+        trainset = CIFAR10(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+        validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_test)
+        testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 3
-        IMG_SIZE = 32
+        INPUT_SHAPE = 32
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"../data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
         else:
-            model_cls_clean = torch.load("../data/CIFAR10_resnet18_clean.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
 
     validset_noise = copy.deepcopy(validset)
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -109,8 +110,10 @@ def main(args):
     y_test = testset.targets
 
     cprint(">>> Inject Noise <<<", "green")
+    model_cls_clean = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
     gpu_id_list = [int(x) for x in args.gpus.split(",")]
-    model_cls_clean = torch.nn.DataParallel(model_cls_clean, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
+    model_cls_clean = DataParallel(model_cls_clean, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
+    model_cls_clean.load_state_dict(model_cls_clean_state_dict)
     _eta_train_temp_pair = [(torch.softmax(model_cls_clean(images.to(device)), 1).detach().cpu(), indices) for
                             _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100))]
     _eta_valid_temp_pair = [(torch.softmax(model_cls_clean(images.to(device)), 1).detach().cpu(), indices) for

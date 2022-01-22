@@ -61,15 +61,16 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
-        trainset = MNIST(root="../data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
-        validset = MNIST(root="../data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-        testset = MNIST(root="../data", split="test", download=True, transform=transform_test)
-        input_channel = 1
-        num_classes = 10
+        trainset = MNIST(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
+        validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
+        testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
+        INPUT_CHANNEL = 1
+        INPUT_SHAPE = 28
+        NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"../data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load(f"./data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
         else:
-            model_cls_clean = torch.load("../data/MNIST_resnet18_clean.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load("./data/MNIST_resnet18_clean.pth")
     elif args.dataset == 'cifar10':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -81,15 +82,16 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-        trainset = CIFAR10(root="../data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        validset = CIFAR10(root="../data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        testset  = CIFAR10(root='../data', split="test", download=True, transform=transform_test)
-        input_channel = 3
-        num_classes = 10
+        trainset = CIFAR10(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+        validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_test)
+        testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
+        INPUT_CHANNEL = 3
+        INPUT_SHAPE = 32
+        NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"../data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
         else:
-            model_cls_clean = torch.load("../data/CIFAR10_resnet18_clean.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
 
     validset_noise = copy.deepcopy(validset)
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -103,8 +105,10 @@ def main(args):
     y_test = testset.targets
 
     cprint(">>> Inject Noise <<<", "green")
+    model_cls_clean = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
     gpu_id_list = [int(x) for x in args.gpus.split(",")]
     model_cls_clean = DataParallel(model_cls_clean, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
+    model_cls_clean.load_state_dict(model_cls_clean_state_dict)
     _eta_train_temp_pair = [(torch.softmax(model_cls_clean(images), 1).detach().cpu(), indices) for
                             _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100))]
     _eta_valid_temp_pair = [(torch.softmax(model_cls_clean(images), 1).detach().cpu(), indices) for
@@ -192,7 +196,7 @@ def main(args):
     print(f"Noisy Level: \t\t\t\t\t {len(train_noise_ind) / len(trainset) * 100:.2f}%")
     print("---------------------------------------------------------")
 
-    model_cls = resnet18(num_classes=num_classes, in_channels=input_channel)
+    model_cls = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
     gpu_id_list = [int(x) for x in args.gpus.split(",")]
     model_cls = DataParallel(model_cls, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
     model_cls = model_cls.to(device)
@@ -240,7 +244,7 @@ def main(args):
             optimizer_cls.zero_grad()
             images, labels = images.to(device), labels.to(device)
             outs = model_cls(images)
-            _, predict = outs[:, :num_classes].max(1)
+            _, predict = outs[:, :NUM_CLASSES].max(1)
 
             loss = criterion_cls(outs, labels)
             loss.backward()
@@ -262,8 +266,8 @@ def main(args):
             model_cls_cali.set_temperature(valid_loader_noise)
 
             # For ECE
-            valid_f_raw = torch.zeros(len(validset), num_classes).float()
-            valid_f_cali = torch.zeros(len(validset), num_classes).float()
+            valid_f_raw = torch.zeros(len(validset), NUM_CLASSES).float()
+            valid_f_cali = torch.zeros(len(validset), NUM_CLASSES).float()
             # For L1
             valid_f_raw_target_conf = torch.zeros(len(validset)).float()
             valid_f_cali_target_conf = torch.zeros(len(validset)).float()
@@ -320,8 +324,8 @@ def main(args):
             test_total = 0
 
             # For ECE
-            test_f_raw = torch.zeros(len(testset), num_classes).float()
-            test_f_cali = torch.zeros(len(testset), num_classes).float()
+            test_f_raw = torch.zeros(len(testset), NUM_CLASSES).float()
+            test_f_cali = torch.zeros(len(testset), NUM_CLASSES).float()
             # For L1
             test_f_raw_target_conf = torch.zeros(len(testset)).float()
             test_f_cali_target_conf = torch.zeros(len(testset)).float()

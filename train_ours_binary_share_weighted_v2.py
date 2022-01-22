@@ -71,9 +71,9 @@ def main(args):
         INPUT_SHAPE = 28
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"./data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load(f"./data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
         else:
-            model_cls_clean = torch.load("./data/MNIST_resnet18_clean.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load("./data/MNIST_resnet18_clean.pth")
     elif args.dataset == 'cifar10':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -92,9 +92,9 @@ def main(args):
         INPUT_SHAPE = 32
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
         else:
-            model_cls_clean = torch.load("./data/CIFAR10_resnet18_clean.pth", map_location=device).module
+            model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
 
     validset_noise = copy.deepcopy(validset)
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -108,8 +108,10 @@ def main(args):
     y_test = testset.targets
 
     cprint(">>> Inject Noise <<<", "green")
+    model_cls_clean = resnet18(num_classes=NUM_CLASSES, in_channels=INPUT_CHANNEL)
     gpu_id_list = [int(x) for x in args.gpus.split(",")]
     model_cls_clean = DataParallel(model_cls_clean, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
+    model_cls_clean.load_state_dict(model_cls_clean_state_dict)
     _eta_train_temp_pair = [(torch.softmax(model_cls_clean(images), 1).detach().cpu(), indices) for
                             _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100))]
     _eta_valid_temp_pair = [(torch.softmax(model_cls_clean(images), 1).detach().cpu(), indices) for
@@ -262,13 +264,13 @@ def main(args):
             _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze()
 
             loss_ce = (gamma_weight[indices] * criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
-            loss_el = (1 - (q * outs_prob).sum(dim=1)).log().mean()
+            loss_el = (1 - (q * outs_prob).sum(dim=1)+1e-4).log().mean()
             loss_cali = criterion_conf(_train_f_cali, delta_prediction)
             loss_cali_en = (_train_f_cali*torch.log(_train_f_cali)+(1-_train_f_cali)*torch.log(1-_train_f_cali)).mean()
             # loss_cali_sm = ((1/2)*torch.log(_train_f_cali)+(1/2)*torch.log(1-_train_f_cali)).mean()
-            # loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            # loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss = loss_ce + loss_cali
+            loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
+            loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
+            loss = loss_ce + loss_cali + loss_en + loss_sm
             loss.backward()
             optimizer_cls.step()
 
@@ -331,19 +333,19 @@ def main(args):
                 valid_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
                 # We only calibrate single class and replace the predicted prob to be the calibrated prob
-                # n_images = images.shape[0]
-                # images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
-                # images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
-                # images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
-                # n_aug = images_aug.shape[0]
-                # n_iter = np.ceil(n_aug/BATCH_SIZE)
-                # _valid_f_cali = []
-                # for ib in range(int(n_iter)):
-                #     image_outs_raw = torch.sigmoid(model_cls(images_aug[ib*BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:, NUM_CLASSES:(NUM_CLASSES + 1)])
-                #     _valid_f_cali.append(image_outs_raw.squeeze())
-                # _valid_f_cali = torch.cat(_valid_f_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
+                n_images = images.shape[0]
+                images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
+                images_aug = images_aug + torch.normal(0, 0.2, size=images_aug.shape).to(device)
+                images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+                n_aug = images_aug.shape[0]
+                n_iter = np.ceil(n_aug/BATCH_SIZE)
+                _valid_f_cali = []
+                for ib in range(int(n_iter)):
+                    image_outs_raw = torch.sigmoid(model_cls(images_aug[ib*BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:, NUM_CLASSES:(NUM_CLASSES + 1)])
+                    _valid_f_cali.append(image_outs_raw.squeeze())
+                _valid_f_cali = torch.cat(_valid_f_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
 
-                _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+                # _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
                 reg_loss = criterion_l1(_valid_f_cali, torch.tensor(eta_tilde_valid[indices]).max(1)[0])
                 valid_f_raw[indices] = prob_outs.detach().cpu()
                 # replace corresponding element
@@ -398,19 +400,19 @@ def main(args):
             test_f_raw[indices] = prob_outs.detach().cpu()
             test_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
-            # n_images = images.shape[0]
-            # images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
-            # images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
-            # images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
-            # n_aug = images_aug.shape[0]
-            # n_iter = np.ceil(n_aug / BATCH_SIZE)
-            # _test_conf_cali = []
-            # for ib in range(int(n_iter)):
-            #     image_outs_raw = torch.sigmoid(model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:,NUM_CLASSES:(NUM_CLASSES+1)])
-            #     _test_conf_cali.append(image_outs_raw.squeeze())
-            # _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
+            n_images = images.shape[0]
+            images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
+            images_aug = images_aug + torch.normal(0, 0.2, size=images_aug.shape).to(device)
+            images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+            n_aug = images_aug.shape[0]
+            n_iter = np.ceil(n_aug / BATCH_SIZE)
+            _test_conf_cali = []
+            for ib in range(int(n_iter)):
+                image_outs_raw = torch.sigmoid(model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:,NUM_CLASSES:(NUM_CLASSES+1)])
+                _test_conf_cali.append(image_outs_raw.squeeze())
+            _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
 
-            _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+            # _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
             test_f_raw[indices, :] = torch.softmax(outs_raw[:, :NUM_CLASSES], 1).detach().cpu()
             test_f_cali[indices, :] = test_f_raw[indices, :].scatter_(1, predict.detach().cpu()[:, None], _test_conf_cali)
             test_f_cali_target_conf[indices] = _test_conf_cali.squeeze()

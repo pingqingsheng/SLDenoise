@@ -331,19 +331,19 @@ def main(args):
                 valid_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
                 # We only calibrate single class and replace the predicted prob to be the calibrated prob
-                n_images = images.shape[0]
-                images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
-                images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
-                images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
-                n_aug = images_aug.shape[0]
-                n_iter = np.ceil(n_aug/BATCH_SIZE)
-                _valid_f_cali = []
-                for ib in range(int(n_iter)):
-                    image_outs_raw = torch.sigmoid(model_cls(images_aug[ib*BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:, NUM_CLASSES:(NUM_CLASSES + 1)])
-                    _valid_f_cali.append(image_outs_raw.squeeze())
-                _valid_f_cali = torch.cat(_valid_f_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
+                # n_images = images.shape[0]
+                # images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
+                # images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
+                # images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+                # n_aug = images_aug.shape[0]
+                # n_iter = np.ceil(n_aug/BATCH_SIZE)
+                # _valid_f_cali = []
+                # for ib in range(int(n_iter)):
+                #     image_outs_raw = torch.sigmoid(model_cls(images_aug[ib*BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:, NUM_CLASSES:(NUM_CLASSES + 1)])
+                #     _valid_f_cali.append(image_outs_raw.squeeze())
+                # _valid_f_cali = torch.cat(_valid_f_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
 
-                # _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+                _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
                 reg_loss = criterion_l1(_valid_f_cali, torch.tensor(eta_tilde_valid[indices]).max(1)[0])
                 valid_f_raw[indices] = prob_outs.detach().cpu()
                 # replace corresponding element
@@ -398,19 +398,19 @@ def main(args):
             test_f_raw[indices] = prob_outs.detach().cpu()
             test_f_raw_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
 
-            n_images = images.shape[0]
-            images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
-            images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
-            images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
-            n_aug = images_aug.shape[0]
-            n_iter = np.ceil(n_aug / BATCH_SIZE)
-            _test_conf_cali = []
-            for ib in range(int(n_iter)):
-                image_outs_raw = torch.sigmoid(model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:,NUM_CLASSES:(NUM_CLASSES+1)])
-                _test_conf_cali.append(image_outs_raw.squeeze())
-            _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
+            # n_images = images.shape[0]
+            # images_aug = images.unsqueeze(1).repeat(1, 10, 1, 1, 1)
+            # images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
+            # images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+            # n_aug = images_aug.shape[0]
+            # n_iter = np.ceil(n_aug / BATCH_SIZE)
+            # _test_conf_cali = []
+            # for ib in range(int(n_iter)):
+            #     image_outs_raw = torch.sigmoid(model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:,NUM_CLASSES:(NUM_CLASSES+1)])
+            #     _test_conf_cali.append(image_outs_raw.squeeze())
+            # _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, 10, -1).mean(1).detach().cpu()
 
-            # _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+            _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
             test_f_raw[indices, :] = torch.softmax(outs_raw[:, :NUM_CLASSES], 1).detach().cpu()
             test_f_cali[indices, :] = test_f_raw[indices, :].scatter_(1, predict.detach().cpu()[:, None], _test_conf_cali)
             test_f_cali_target_conf[indices] = _test_conf_cali.squeeze()

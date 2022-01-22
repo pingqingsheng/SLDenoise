@@ -291,11 +291,18 @@ def main(args):
                 # Calibrated model result record
                 model_cls.module.enable_dropout()
                 prob_outs = []
-                for image in images:
-                    image_copys = image.repeat(N_SAMPLES, 1, 1, 1)
-                    prob_outs_mc = torch.softmax(model_cls(image_copys), 1)
-                    prob_outs.append(prob_outs_mc.mean(0).unsqueeze(0))
-                prob_outs = torch.cat(prob_outs, 0)
+                n_images = images.shape[0]
+                images_aug = images.unsqueeze(1).repeat(1, N_SAMPLES, 1, 1, 1)
+                images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
+                images_aug = images_aug.reshape(-1, INPUT_CHANNEL, IMG_SIZE, IMG_SIZE)
+                n_aug = images_aug.shape[0]
+                n_iter = np.ceil(n_aug / BATCH_SIZE)
+                for ib in range(int(n_iter)):
+                    image_outs_raw = torch.softmax(
+                        model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib + 1) * BATCH_SIZE)])[:, :NUM_CLASSES], 1
+                    )
+                    prob_outs.append(image_outs_raw.squeeze())
+                prob_outs = torch.cat(prob_outs, 0).reshape(n_images, N_SAMPLES, -1).mean(1)
                 _, predict = prob_outs.max(1)
                 correct_prediction = predict.eq(labels).float()
                 valid_correct_cali += correct_prediction.sum().item()
@@ -350,11 +357,18 @@ def main(args):
                 # Calibrated model result record
                 model_cls.module.enable_dropout()
                 prob_outs = []
-                for image in images:
-                    image_copys = image.repeat(N_SAMPLES, 1, 1, 1)
-                    prob_outs_mc = torch.softmax(model_cls(image_copys), 1)
-                    prob_outs.append(prob_outs_mc.mean(0).unsqueeze(0))
-                prob_outs = torch.cat(prob_outs, 0)
+                n_images = images.shape[0]
+                images_aug = images.unsqueeze(1).repeat(1, N_SAMPLES, 1, 1, 1)
+                images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
+                images_aug = images_aug.reshape(-1, INPUT_CHANNEL, IMG_SIZE, IMG_SIZE)
+                n_aug = images_aug.shape[0]
+                n_iter = np.ceil(n_aug / BATCH_SIZE)
+                for ib in range(int(n_iter)):
+                    image_outs_raw = torch.softmax(
+                        model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib + 1) * BATCH_SIZE)])[:, :NUM_CLASSES], 1
+                    )
+                    prob_outs.append(image_outs_raw.squeeze())
+                prob_outs = torch.cat(prob_outs, 0).reshape(n_images, N_SAMPLES, -1).mean(1)
                 _, predict = prob_outs.max(1)
                 correct_prediction = predict.eq(labels).float()
                 test_correct_cali += correct_prediction.sum().item()

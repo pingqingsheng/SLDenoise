@@ -672,7 +672,7 @@ if __name__ == "__main__":
     exp_config['cali_ece'] = []
     exp_config['cali_acc'] = []
     exp_config['seed'] = []
-    for seed in [77]:
+    for seed in [77, 78, 79]:
         args.seed = seed
         args.calibration_mode = False
         raw_l1, raw_ece, raw_acc = main(args)

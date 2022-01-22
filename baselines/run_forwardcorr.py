@@ -69,9 +69,9 @@ def main(args):
         INPUT_CHANNEL = 1
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"../data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
+            model_cls_clean = torch.load(f"../data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth", map_location=DEVICE).module
         else:
-            model_cls_clean = torch.load("../data/MNIST_resnet18_clean.pth")
+            model_cls_clean = torch.load("../data/MNIST_resnet18_clean.pth", map_location=DEVICE).module
     elif args.dataset == 'cifar10':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -89,9 +89,9 @@ def main(args):
         INPUT_CHANNEL = 3
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean = torch.load(f"../data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
+            model_cls_clean = torch.load(f"../data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth", map_location=DEVICE).module
         else:
-            model_cls_clean = torch.load("../data/CIFAR10_resnet18_clean.pth")
+            model_cls_clean = torch.load("../data/CIFAR10_resnet18_clean.pth", map_location=DEVICE).module
 
     validset_noise = copy.deepcopy(validset)
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -105,11 +105,13 @@ def main(args):
     y_test = testset.targets
 
     cprint(">>> Inject Noise <<<", "green")
-    _eta_train_temp_pair = [(torch.softmax(model_cls_clean(images).to(DEVICE), 1).detach().cpu(), indices) for
+    gpu_id_list = [int(x) for x in args.gpus.split(",")]
+    model_cls_clean = DataParallel(model_cls_clean, device_ids=[x-gpu_id_list[0] for x in gpu_id_list])
+    _eta_train_temp_pair = [(torch.softmax(model_cls_clean(images.to(DEVICE)), 1).detach().cpu(), indices) for
                             _, (indices, images, labels, _) in enumerate(tqdm(train_loader, ascii=True, ncols=100))]
-    _eta_valid_temp_pair = [(torch.softmax(model_cls_clean(images).to(DEVICE), 1).detach().cpu(), indices) for
+    _eta_valid_temp_pair = [(torch.softmax(model_cls_clean(images.to(DEVICE)), 1).detach().cpu(), indices) for
                             _, (indices, images, labels, _) in enumerate(tqdm(valid_loader, ascii=True, ncols=100))]
-    _eta_test_temp_pair = [(torch.softmax(model_cls_clean(images).to(DEVICE), 1).detach().cpu(), indices) for
+    _eta_test_temp_pair = [(torch.softmax(model_cls_clean(images.to(DEVICE)), 1).detach().cpu(), indices) for
                            _, (indices, images, labels, _) in enumerate(tqdm(test_loader, ascii=True, ncols=100))]
     _eta_train_temp = torch.cat([x[0] for x in _eta_train_temp_pair])
     _eta_valid_temp = torch.cat([x[0] for x in _eta_valid_temp_pair])
@@ -502,7 +504,7 @@ if __name__ == "__main__":
     exp_config['cali_ece'] = []
     exp_config['cali_acc'] = []
     exp_config['seed'] = []
-    for seed in [77]:
+    for seed in [77, 78, 79]:
         args.seed = seed
         args.calibration_mode = False
         raw_l1, raw_ece, raw_acc = main(args)

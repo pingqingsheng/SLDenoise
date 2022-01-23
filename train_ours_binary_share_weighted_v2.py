@@ -264,13 +264,13 @@ def main(args):
             _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze()
 
             loss_ce = (gamma_weight[indices] * criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
-            loss_el = (1 - (q * outs_prob).sum(dim=1)+1e-4).log().mean()
+            loss_el = (1 - (q * outs_prob).sum(dim=1)+1e-6).log().mean()
             loss_cali = criterion_conf(_train_f_cali, delta_prediction)
             loss_cali_en = (_train_f_cali*torch.log(_train_f_cali)+(1-_train_f_cali)*torch.log(1-_train_f_cali)).mean()
             # loss_cali_sm = ((1/2)*torch.log(_train_f_cali)+(1/2)*torch.log(1-_train_f_cali)).mean()
             loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
             loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss = loss_ce + loss_cali + loss_en + loss_sm
+            loss = loss_ce + loss_cali + loss_en + loss_sm + loss_el if epoch > args.warm_up else loss_ce
             loss.backward()
             optimizer_cls.step()
 

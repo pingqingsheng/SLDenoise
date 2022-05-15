@@ -2,7 +2,6 @@ import os
 import sys
 from typing import List
 import json
-import pdb
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +9,8 @@ from torch.utils.data import DataLoader
 from torch.nn import DataParallel
 from torch import nn, optim
 from torchvision import transforms
+# import torch.multiprocessing
+# torch.multiprocessing.set_sharing_strategy('file_system')
 import numpy as np
 import argparse
 import random
@@ -18,8 +19,8 @@ import copy
 from termcolor import cprint
 import datetime
 
-from data.MNIST import MNIST
-from data.CIFAR import CIFAR10
+from data.MNIST_SLDenoise import  MNIST_SLDenoise
+from data.CIFAR_SLDenoise import CIFAR10_SLDenoise
 from baselines.baseline_network import resnet18, resnet34
 from utils.utils import _init_fn, ECELoss
 from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
@@ -29,7 +30,7 @@ from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, n
 # ELR
 BETA: float = 3
 LAMBDA: float = 0.8
-N_SAMPLE: int = 20
+N_SAMPLE: int = 5
 # General setting
 TRAIN_VALIDATION_RATIO: float = 0.8
 N_EPOCH_OUTER: int = 1
@@ -41,7 +42,6 @@ BATCH_SIZE: int = 128
 SCHEDULER_DECAY_MILESTONE: List = [40, 80, 120]
 MONITOR_WINDOW: int = 1
 # ----------------------------------------------------
-
 
 def main(args):
 
@@ -58,6 +58,7 @@ def main(args):
     # Data Loading and Processing
     if args.dataset == 'mnist':
         transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
@@ -65,9 +66,25 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
-        trainset = MNIST(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
-        validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-        testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
+        trainset = MNIST_SLDenoise(root="./data",
+                                   split="train",
+                                   train_ratio=TRAIN_VALIDATION_RATIO,
+                                   download=True,
+                                   transform=transform_train,
+                                   mode='normal',
+                                   n_sample=N_SAMPLE)
+        validset = MNIST_SLDenoise(root="./data",
+                                   split="valid",
+                                   train_ratio=TRAIN_VALIDATION_RATIO,
+                                   transform=transform_train,
+                                   mode='normal',
+                                   n_sample=N_SAMPLE)
+        testset = MNIST_SLDenoise(root="./data",
+                                  split="test",
+                                  download=True,
+                                  transform=transform_test,
+                                  mode='normal',
+                                  n_sample=N_SAMPLE)
         INPUT_CHANNEL = 1
         INPUT_SHAPE = 28
         NUM_CLASSES = 10
@@ -77,8 +94,6 @@ def main(args):
             model_cls_clean_state_dict = torch.load("./data/MNIST_resnet18_clean.pth")
     elif args.dataset == 'cifar10':
         transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
@@ -86,9 +101,26 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-        trainset = CIFAR10(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_test)
-        testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
+        trainset = CIFAR10_SLDenoise(root="./data",
+                                     split="train",
+                                     train_ratio=TRAIN_VALIDATION_RATIO,
+                                     download=True,
+                                     transform=transform_train,
+                                     mode='normal',
+                                     n_sample=N_SAMPLE)
+        validset = CIFAR10_SLDenoise(root="./data",
+                                     split="valid",
+                                     train_ratio=TRAIN_VALIDATION_RATIO,
+                                     download=True,
+                                     transform=transform_test,
+                                     mode='normal',
+                                     n_sample=N_SAMPLE)
+        testset  = CIFAR10_SLDenoise(root='./data',
+                                     split="test",
+                                     download=True,
+                                     transform=transform_test,
+                                     mode='normal',
+                                     n_sample=N_SAMPLE)
         INPUT_CHANNEL = 3
         INPUT_SHAPE = 32
         NUM_CLASSES = 10
@@ -98,10 +130,10 @@ def main(args):
             model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
 
     validset_noise = copy.deepcopy(validset)
-    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
+    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
 
     # Inject noise here
     y_train = copy.deepcopy(trainset.targets)
@@ -209,6 +241,7 @@ def main(args):
     scheduler_cls = torch.optim.lr_scheduler.MultiStepLR(optimizer_cls, gamma=0.5, milestones=SCHEDULER_DECAY_MILESTONE)
 
     criterion_cls = torch.nn.CrossEntropyLoss(reduction='none')
+    criterion_sm  = torch.nn.KLDivLoss(reduction='batchmean')
     criterion_conf = torch.nn.MSELoss()
     criterion_calibrate = ECELoss()
     criterion_l1 = torch.nn.L1Loss()
@@ -239,6 +272,8 @@ def main(args):
     gamma_weight = torch.zeros(len(gamma)).to(device).float()
     f_record = torch.zeros([args.rollWindow, len(y_train), NUM_CLASSES])
     correctness_record = torch.zeros(len(trainset))
+    # q = (1/2)*torch.ones(BATCH_SIZE*N_SAMPLE, NUM_CLASSES).to(device)
+    q = (1 / 2) * torch.ones(BATCH_SIZE, NUM_CLASSES).to(device)
 
     for epoch in range(N_EPOCH_INNER_CLS):
 
@@ -254,35 +289,38 @@ def main(args):
                 continue
             optimizer_cls.zero_grad()
             images, labels = images.to(device), labels.to(device)
-            t_km1 = f_record[:, indices].mean(0).to(device)
-            outs = model_cls(images)
-            outs_prob = torch.softmax(outs[:, :NUM_CLASSES], 1)
-            q = BETA*t_km1 + (1 - BETA)*outs_prob
-            # _, predict = outs[:, :NUM_CLASSES].max(1)
 
-            _, predict = f_record[:, indices].to(device).mean(0).max(1)
-            delta_prediction = predict.eq(labels).float()
+            # images =  images.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
+            # images_aug = images + torch.normal(0, 0.05, size=images.shape).to(device)
+            # labels_aug = labels.unsqueeze(1).repeat(1,N_SAMPLE).reshape(-1, len(labels)*N_SAMPLE).squeeze()
+
+            images_aug, labels_aug = images, labels
+            outs = model_cls(images_aug)
+            outs_prob = torch.softmax(outs[:, :NUM_CLASSES], 1)
+            _, predict = outs_prob.max(1)
+
+            delta_prediction = predict.eq(labels_aug).float()
             gamma_weight[indices] = gamma[indices]/gamma[indices].sum()
             _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze()
 
-            loss_ce = (gamma_weight[indices] * criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
-            # loss_el = (1 - (q * outs_prob).sum(dim=1)+1e-6).log().mean()
+            # loss_ce = criterion_cls(outs[:, :NUM_CLASSES], labels_aug).reshape(BATCH_SIZE, N_SAMPLE)
+            # loss_ce = (gamma_weight[indices] * loss_ce.mean(1)).sum()
+
+            loss_ce = (gamma_weight[indices]*criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
             loss_cali = criterion_conf(_train_f_cali, delta_prediction)
-            # loss_cali_en = (_train_f_cali*torch.log(_train_f_cali)+(1-_train_f_cali)*torch.log(1-_train_f_cali)).mean()
-            # loss_cali_sm = ((1/2)*torch.log(_train_f_cali)+(1/2)*torch.log(1-_train_f_cali)).mean()
-            loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss = loss_ce + loss_cali + loss_en + loss_sm if epoch > args.warm_up else loss_ce
+            loss_sm   = criterion_sm(outs_prob.log(), q) + criterion_sm(q.log(), outs_prob)
+            loss = loss_ce + loss_cali
             loss.backward()
             optimizer_cls.step()
 
             train_loss += loss.detach().cpu().item()
-            train_correct += predict.eq(labels).sum().item()
-            train_total += len(labels)
+            train_correct += predict.eq(labels_aug).sum().item()
+            train_total += len(labels_aug)
 
             # record the network predictions
             with torch.no_grad():
-                f_record[epoch % args.rollWindow, indices] = F.softmax(outs.detach().cpu()[:, :NUM_CLASSES], dim=1)
+                # f_record[epoch % args.rollWindow, indices] = outs_prob.reshape(BATCH_SIZE, N_SAMPLE, 10).mean(1).detach().cpu()
+                f_record[epoch % args.rollWindow, indices] = outs_prob.detach().cpu()
                 correctness_record[indices] = f_record[:, indices].mean(0).argmax(1).eq(labels.detach().cpu()).float()
 
         train_acc = train_correct / train_total
@@ -323,7 +361,6 @@ def main(args):
                     continue
                 images, labels = images.to(device), labels.to(device)
                 outs_raw = model_cls(images)
-                # outs_cali = model_cls_cali(images)
 
                 # Raw model result record
                 prob_outs = torch.softmax(outs_raw[:, :NUM_CLASSES], 1)
@@ -339,21 +376,13 @@ def main(args):
                 images_aug = images.unsqueeze(1).repeat(1, N_SAMPLE, 1, 1, 1)
                 images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
                 images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
-                n_aug = images_aug.shape[0]
-                n_iter = np.ceil(n_aug/BATCH_SIZE)
-                _valid_f_cali = []
-                for ib in range(int(n_iter)):
-                    image_outs_raw = torch.sigmoid(model_cls(images_aug[ib*BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:, NUM_CLASSES:(NUM_CLASSES + 1)])
-                    _valid_f_cali.append(image_outs_raw.squeeze())
-                _valid_f_cali = torch.cat(_valid_f_cali).reshape(n_images, N_SAMPLE, -1).mean(1).detach().cpu()
+                _valid_f_cali = torch.sigmoid(model_cls(images_aug)[:, NUM_CLASSES:]).reshape(n_images, N_SAMPLE).mean(1).unsqueeze(1).detach().cpu()
 
-                # _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
-                reg_loss = criterion_l1(_valid_f_cali, torch.tensor(eta_tilde_valid[indices]).max(1)[0])
-                valid_f_raw[indices] = prob_outs.detach().cpu()
+                prob_outs = prob_outs.detach().cpu()
+                valid_f_raw[indices] = prob_outs
                 # replace corresponding element
-
-                prob_outs = (1 - _valid_f_cali) * prob_outs / (prob_outs.sum(1) - prob_outs.max(1)[0]).unsqueeze(1)
-                valid_f_cali[indices, :] = prob_outs.scatter_(1, predict.detach().cpu()[:, None], _valid_f_cali)
+                # _valid_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:]).detach().cpu()
+                reg_loss = criterion_l1(_valid_f_cali, eta_tilde_valid[indices].max(1)[0])
                 valid_f_cali[indices] = prob_outs.detach().cpu().scatter_(1, predict.detach().cpu()[:, None], _valid_f_cali)
                 valid_f_cali_target_conf[indices] = _valid_f_cali.squeeze()
                 valid_correct_cali += valid_f_cali[indices].max(1)[1].eq(labels.detach().cpu()).sum().item()
@@ -409,19 +438,14 @@ def main(args):
             images_aug = images.unsqueeze(1).repeat(1, N_SAMPLE, 1, 1, 1)
             images_aug = images_aug + torch.normal(0, 0.1, size=images_aug.shape).to(device)
             images_aug = images_aug.reshape(-1, INPUT_CHANNEL, INPUT_SHAPE, INPUT_SHAPE)
-            n_aug = images_aug.shape[0]
-            n_iter = np.ceil(n_aug / BATCH_SIZE)
-            _test_conf_cali = []
-            for ib in range(int(n_iter)):
-                image_outs_raw = torch.sigmoid(model_cls(images_aug[ib * BATCH_SIZE:min(n_aug, (ib+1)*BATCH_SIZE)])[:,NUM_CLASSES:(NUM_CLASSES+1)])
-                _test_conf_cali.append(image_outs_raw.squeeze())
-            _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, N_SAMPLE, -1).mean(1).detach().cpu()
+            _test_f_cali = torch.sigmoid(model_cls(images_aug)[:, NUM_CLASSES:]).reshape(n_images, N_SAMPLE).mean(1).unsqueeze(1).detach().cpu()
 
-            # _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
-            prob_outs = (1-_test_conf_cali)*prob_outs/(prob_outs.sum(1)-prob_outs.max(1)[0]).unsqueeze(1)
-            test_f_cali[indices, :] = prob_outs.scatter_(1, predict.detach().cpu()[:, None], _test_conf_cali)
-
-            test_f_cali_target_conf[indices] = _test_conf_cali.squeeze()
+            prob_outs = prob_outs.detach().cpu()
+            # _test_f_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:]).detach().cpu()
+            prob_outs = (1-_test_f_cali)*prob_outs/(prob_outs.sum(1)-prob_outs.max(1)[0]).unsqueeze(1)
+            test_f_raw[indices, :]  = prob_outs
+            test_f_cali[indices, :] = prob_outs.scatter_(1, predict.detach().cpu()[:, None], _test_f_cali)
+            test_f_cali_target_conf[indices] = _test_f_cali.squeeze()
 
         naive_l1 = criterion_l1(test_f_raw.max(1)[0], torch.tensor(eta_tilde_test).max(1)[0])
         ours_l1 = criterion_l1(test_f_cali.max(1)[0], torch.tensor(eta_tilde_test).max(1)[0])
@@ -545,12 +569,12 @@ class ECELoss(nn.Module):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
     parser.add_argument("--seed", type=int, help="Random seed for the experiment", default=77)
-    parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='0')
-    parser.add_argument("--dataset", type=str, help="Experiment Dataset", default='cifar10',
+    parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='7')
+    parser.add_argument("--dataset", type=str, help="Experiment Dataset", default='mnist',
                         choices={'mnist', 'cifar10', 'cifar100'})
-    parser.add_argument("--noise_type", type=str, help="Noise type", default='uniform',
+    parser.add_argument("--noise_type", type=str, help="Noise type", default='idl',
                         choices={"linear", "uniform", "asymmetric", "idl"})
-    parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=0.8)
+    parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=0.2)
     parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
     parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
     parser.add_argument("--figure", action='store_true', help='True to plot performance log')

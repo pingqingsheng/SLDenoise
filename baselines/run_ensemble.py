@@ -27,6 +27,8 @@ from data.CIFAR import CIFAR10
 from utils.utils import _init_fn, ECELoss
 from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
 
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 # Experiment Setting Control Panel
 # ---------------------------------------------------
@@ -66,16 +68,16 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
-        trainset = MNIST(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
-        validset = MNIST(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
-        testset = MNIST(root="./data", split="test", download=True, transform=transform_test)
+        trainset = MNIST(root="../data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True,transform=transform_train)
+        validset = MNIST(root="../data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, transform=transform_train)
+        testset = MNIST(root="../data", split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 1
         INPUT_SHAPE = 28
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean_state_dict = torch.load(f"./data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
+            model_cls_clean_state_dict = torch.load(f"../data/MNIST_resnet18_clean_{int(args.noise_strength*100)}.pth")
         else:
-            model_cls_clean_state_dict = torch.load("./data/MNIST_resnet18_clean.pth")
+            model_cls_clean_state_dict = torch.load("../data/MNIST_resnet18_clean.pth")
     elif args.dataset == 'cifar10':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -87,16 +89,16 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-        trainset = CIFAR10(root="./data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
-        validset = CIFAR10(root="./data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_test)
-        testset  = CIFAR10(root='./data', split="test", download=True, transform=transform_test)
+        trainset = CIFAR10(root="../data", split="train", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_train)
+        validset = CIFAR10(root="../data", split="valid", train_ratio=TRAIN_VALIDATION_RATIO, download=True, transform=transform_test)
+        testset  = CIFAR10(root='../data', split="test", download=True, transform=transform_test)
         INPUT_CHANNEL = 3
         INPUT_SHAPE = 32
         NUM_CLASSES = 10
         if args.noise_type == 'idl':
-            model_cls_clean_state_dict = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
+            model_cls_clean_state_dict = torch.load(f"../data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
         else:
-            model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
+            model_cls_clean_state_dict = torch.load("../data/CIFAR10_resnet18_clean.pth")
 
     validset_noise = copy.deepcopy(validset)
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
@@ -240,6 +242,7 @@ def main(args):
     _best_raw_ece = np.inf
     _best_ensemble_l1 = np.inf
     _best_ensemble_ece = np.inf
+    _best_cali_acc = 0
 
     for epoch in range(N_EPOCH_INNER_CLS):
 
@@ -402,6 +405,9 @@ def main(args):
             if l1_loss_cali < _best_ensemble_l1:
                 _best_ensemble_l1 = l1_loss_cali
                 _best_ensemble_l1_epoch = epoch
+            if test_acc_cali > _best_cali_acc:
+                _best_cali_acc = test_acc_cali
+                _best_cali_acc_epoch = epoch
 
             print(f"Step [{epoch + 1}|{N_EPOCH_INNER_CLS}] - Train Loss: {train_loss/train_total:7.3f} - Train Acc: {train_acc:7.3f} - Valid Acc Raw: {test_acc_raw:7.3f} - Valid Acc Cali: {test_acc_cali:7.3f}")
             print(f"ECE Raw: {ece_loss_raw.item():.3f}/{_best_raw_ece.item():.3f} - ECE Cali: {ece_loss_cali.item():.3f}/{_best_ensemble_ece.item():.3f} - Best ECE Raw Epoch: {_best_raw_ece_epoch} - Best ECE Cali Epoch: {_best_ensemble_ece_epoch}")
@@ -437,7 +443,50 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_{args.dataset}_{args.noise_type}_{args.noise_strength}_ensemble_plot_{time_stamp}.png"))
 
-    return _best_ensemble_l1.item(), _best_ensemble_ece.item()
+    # >>>>>>>>>>>>>>>>>> Debugging
+    import pickle as pkl
+    
+    debug_folder = "../debug/ensemble"
+    os.makedirs(debug_folder, exist_ok=True)
+    time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y%m%d%H%M%S")
+    debuglogger = os.path.join(debug_folder, f"ensemble_{args.dataset}_{args.noise_type}_{args.noise_strength}_{time_stamp}.pkl")
+    print(debuglogger)
+    
+    config = {'train_valid_ratio':TRAIN_VALIDATION_RATIO, 
+              'n_epoch_outer':N_EPOCH_OUTER, 
+              'n_epoch_inner':N_EPOCH_INNER_CLS, 
+              'conf_record_epoch':CONF_RECORD_EPOCH, 
+              'lr':LR, 
+              'weight_decay':WEIGHT_DECAY, 
+              'batch_size':BATCH_SIZE, 
+              'mile_stone':SCHEDULER_DECAY_MILESTONE, 
+              'monitor_window':MONITOR_WINDOW, 
+              'nnets':NUM_NETS}
+    
+    _loss_record[_count] = float(train_loss/train_total)
+    _valid_acc_raw_record[_count] = float(valid_acc_raw)
+    _valid_acc_cali_record[_count] = float(valid_acc_cali)
+    _ece_raw_record[_count] = float(ece_loss_raw.item())
+    _ece_cali_record[_count] = float(ece_loss_cali.item())
+    _l1_raw_record[_count] = float(l1_loss_raw.item())
+    _l1_cali_record[_count] = float(l1_loss_cali.item())
+    
+    debugresult = {
+        'config':config,
+        'loss_record': _loss_record, 
+        'valid_raw_acc': _valid_acc_raw_record, 
+        'valid_cali_acc': _valid_acc_cali_record, 
+        'valid_raw_ece': _ece_raw_record, 
+        'valid_cali_ece': _ece_cali_record, 
+        'valid_raw_l1': _l1_raw_record, 
+        'valid_cali_l1': _l1_cali_record
+    }
+    with open(debuglogger, 'wb') as f:
+        pkl.dump(debugresult, f)
+    f.close()
+    # >>>>>>>>>>>>>>>>>>
+    
+    return l1_loss_cali.item(), _best_ensemble_l1.item(), ece_loss_cali.item(), _best_ensemble_ece.item(), test_acc_cali, _best_cali_acc
     # return l1_loss_cali.item(), ece_loss_cali.item()
 
 if __name__ == '__main__':
@@ -469,20 +518,30 @@ if __name__ == '__main__':
     for k, v in args._get_kwargs():
         exp_config[k] = v
 
-    exp_config['ensemble_l1'] = []
-    exp_config['ensemble_ece'] = []
-    for seed in [77, 78, 79]:
-        args.seed = seed
-        ours_l1,  ours_ece = main(args)
-        exp_config['ensemble_l1'].append(ours_l1)
-        exp_config['ensemble_ece'].append(ours_ece)
-
+    exp_config['best_l1'] = []
+    exp_config['best_ece'] = []
+    exp_config['best_acc'] = []
+    exp_config['l1']  = []
+    exp_config['ece'] = []
+    exp_config['acc'] = []
+    
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
     save_folder = os.path.join("../exp_logs/ensemble_" + dir_date)
     os.makedirs(save_folder, exist_ok=True)
-    save_file_name = 'ensemble_' + datetime.date.today().strftime("%d_%m_%Y") + f"_{args.seed}_{args.dataset}_{args.noise_type}_{args.noise_strength}.json"
+    save_file_name = 'ensemble_' + datetime.date.today().strftime("%d_%m_%Y") + f"{args.dataset}_{args.noise_type}_{args.noise_strength}.json"
     save_file_name = os.path.join(save_folder, save_file_name)
     print(save_file_name)
-    with open(save_file_name, "w") as f:
-        json.dump(exp_config, f, sort_keys=False, indent=4)
-    f.close()
+    
+    for seed in [77, 78, 79]:
+        args.seed = seed
+        l1, best_l1, ece, best_ece, acc, best_acc = main(args)
+        exp_config['best_l1'].append(best_l1)
+        exp_config['best_ece'].append(best_ece)
+        exp_config['best_acc'].append(best_acc)
+        exp_config['l1'].append(l1)
+        exp_config['ece'].append(ece)
+        exp_config['acc'].append(acc)
+
+        with open(save_file_name, "w") as f:
+            json.dump(exp_config, f, sort_keys=False, indent=4)
+        f.close()

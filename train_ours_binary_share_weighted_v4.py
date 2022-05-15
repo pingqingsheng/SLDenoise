@@ -98,10 +98,10 @@ def main(args):
             model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
 
     validset_noise = copy.deepcopy(validset)
-    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
+    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))
 
     # Inject noise here
     y_train = copy.deepcopy(trainset.targets)
@@ -212,6 +212,7 @@ def main(args):
     criterion_conf = torch.nn.MSELoss()
     criterion_calibrate = ECELoss()
     criterion_l1 = torch.nn.L1Loss()
+    criterion_sm  = torch.nn.KLDivLoss(reduction='batchmean')
 
     # For monitoring purpose
     _loss_record = np.zeros(len(np.linspace(0, N_EPOCH_INNER_CLS - N_EPOCH_INNER_CLS % MONITOR_WINDOW, int(
@@ -239,6 +240,7 @@ def main(args):
     gamma_weight = torch.zeros(len(gamma)).to(device).float()
     f_record = torch.zeros([args.rollWindow, len(y_train), NUM_CLASSES])
     correctness_record = torch.zeros(len(trainset))
+    q = (1 / 2) * torch.ones(BATCH_SIZE, NUM_CLASSES).to(device)
 
     for epoch in range(N_EPOCH_INNER_CLS):
 
@@ -254,11 +256,8 @@ def main(args):
                 continue
             optimizer_cls.zero_grad()
             images, labels = images.to(device), labels.to(device)
-            t_km1 = f_record[:, indices].mean(0).to(device)
             outs = model_cls(images)
             outs_prob = torch.softmax(outs[:, :NUM_CLASSES], 1)
-            q = BETA*t_km1 + (1 - BETA)*outs_prob
-            # _, predict = outs[:, :NUM_CLASSES].max(1)
 
             _, predict = f_record[:, indices].to(device).mean(0).max(1)
             delta_prediction = predict.eq(labels).float()
@@ -266,13 +265,9 @@ def main(args):
             _train_f_cali = torch.sigmoid(outs[:, NUM_CLASSES:]).squeeze()
 
             loss_ce = (gamma_weight[indices] * criterion_cls(outs[:, :NUM_CLASSES], labels)).sum()
-            # loss_el = (1 - (q * outs_prob).sum(dim=1)+1e-6).log().mean()
             loss_cali = criterion_conf(_train_f_cali, delta_prediction)
-            # loss_cali_en = (_train_f_cali*torch.log(_train_f_cali)+(1-_train_f_cali)*torch.log(1-_train_f_cali)).mean()
-            # loss_cali_sm = ((1/2)*torch.log(_train_f_cali)+(1/2)*torch.log(1-_train_f_cali)).mean()
-            loss_en = -(torch.softmax(outs[:, :NUM_CLASSES], 1) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss_sm = -((1 / NUM_CLASSES * torch.ones(outs[:, :NUM_CLASSES].shape).to(device)) * torch.log(torch.softmax(outs[:, :NUM_CLASSES], 1))).mean()
-            loss = loss_ce + loss_cali + loss_en + loss_sm if epoch > args.warm_up else loss_ce
+            loss_sm = criterion_sm(outs_prob.log(), q) + criterion_sm(q.log(), outs_prob)
+            loss = loss_ce + loss_cali + 0.1*loss_sm
             loss.backward()
             optimizer_cls.step()
 
@@ -351,7 +346,7 @@ def main(args):
                 reg_loss = criterion_l1(_valid_f_cali, torch.tensor(eta_tilde_valid[indices]).max(1)[0])
                 valid_f_raw[indices] = prob_outs.detach().cpu()
                 # replace corresponding element
-
+                prob_outs = prob_outs.detach().cpu()
                 prob_outs = (1 - _valid_f_cali) * prob_outs / (prob_outs.sum(1) - prob_outs.max(1)[0]).unsqueeze(1)
                 valid_f_cali[indices, :] = prob_outs.scatter_(1, predict.detach().cpu()[:, None], _valid_f_cali)
                 valid_f_cali[indices] = prob_outs.detach().cpu().scatter_(1, predict.detach().cpu()[:, None], _valid_f_cali)
@@ -418,9 +413,9 @@ def main(args):
             _test_conf_cali = torch.cat(_test_conf_cali).reshape(n_images, N_SAMPLE, -1).mean(1).detach().cpu()
 
             # _test_conf_cali = torch.sigmoid(outs_raw[:, NUM_CLASSES:(NUM_CLASSES + 1)]).detach().cpu()
+            prob_outs = prob_outs.detach().cpu()
             prob_outs = (1-_test_conf_cali)*prob_outs/(prob_outs.sum(1)-prob_outs.max(1)[0]).unsqueeze(1)
             test_f_cali[indices, :] = prob_outs.scatter_(1, predict.detach().cpu()[:, None], _test_conf_cali)
-
             test_f_cali_target_conf[indices] = _test_conf_cali.squeeze()
 
         naive_l1 = criterion_l1(test_f_raw.max(1)[0], torch.tensor(eta_tilde_test).max(1)[0])
@@ -546,13 +541,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
     parser.add_argument("--seed", type=int, help="Random seed for the experiment", default=77)
     parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='0')
-    parser.add_argument("--dataset", type=str, help="Experiment Dataset", default='cifar10',
+    parser.add_argument("--dataset", type=str, help="Experiment Dataset", default='mnist',
                         choices={'mnist', 'cifar10', 'cifar100'})
-    parser.add_argument("--noise_type", type=str, help="Noise type", default='uniform',
+    parser.add_argument("--noise_type", type=str, help="Noise type", default='idl',
                         choices={"linear", "uniform", "asymmetric", "idl"})
     parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=0.8)
-    parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
-    parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
+    parser.add_argument("--rollWindow", default=1, help="rolling window to calculate the confidence", type=int)
+    parser.add_argument("--warm_up", default=1, help="warm-up period", type=int)
     parser.add_argument("--figure", action='store_true', help='True to plot performance log')
     # algorithm hp
     parser.add_argument("--alpha", type=float, help="CE loss multiplier", default=100)

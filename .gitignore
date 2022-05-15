@@ -20,4 +20,4 @@ data/cifar-10-batches-py/
 data/cifar-10-python.tar.gz
 debug/
 /baselines/data
-data/
+data/MNIST_SLDenoise/

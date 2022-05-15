@@ -397,7 +397,11 @@ def resnet18(pretrained=False, **kwargs):
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
     if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
+        pretrained_dict = model_zoo.load_url(model_urls['resnet18'])
+        pretrained_dict.pop('fc.weight'), pretrained_dict.pop('fc.bias')
+        model_dict = model.state_dict()
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
     return model
 
 def resnet18_share(pretrained=False, **kwargs):

@@ -267,7 +267,7 @@ class MNIST_Combo(MNIST):
         return index, img, target, delta_eta, exogeneous_var
 
 
-# Train model with clean examples
+# Train model with clean examples to generate IDL synthetic dataset
 if __name__ == "__main__":
 
     from typing import List

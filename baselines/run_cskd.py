@@ -108,11 +108,13 @@ def main(args):
         else:
             model_cls_clean_state_dict = torch.load("../data/CIFAR10_resnet18_clean.pth")
 
+    get_train_sampler = lambda d: PairBatchSampler(d, BATCH_SIZE)
+    get_test_sampler  = lambda d: BatchSampler(SequentialSampler(d), BATCH_SIZE, False)
+
     validset_noise = copy.deepcopy(validset)
-    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
-    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
-    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed))
+    train_loader = DataLoader(trainset,  num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_train_sampler(trainset))
+    valid_loader = DataLoader(validset,  num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(validset))
+    test_loader = DataLoader(testset, num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(testset))
 
     # Inject noise here
     y_train = copy.deepcopy(trainset.targets)

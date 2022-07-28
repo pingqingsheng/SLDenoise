@@ -8,7 +8,6 @@ result/
 result/*.pkl
 result/
 
-data/*.pth
 data/data/
 data/MNIST/
 data/MNIST_Combo/

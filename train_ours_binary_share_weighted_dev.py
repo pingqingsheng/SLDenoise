@@ -1,3 +1,4 @@
+from logging import raiseExceptions
 import os
 import sys
 from typing import List
@@ -20,6 +21,7 @@ import datetime
 
 from data.MNIST import MNIST
 from data.CIFAR import CIFAR10
+from data.TINYIMAGENET import TImgNetDatasetTrain, TImgNetDatasetTest
 from baselines.baseline_network import resnet18, resnet34
 from utils.utils import _init_fn, ECELoss
 from utils.noise import perturb_eta, noisify_with_P, noisify_mnist_asymmetric, noisify_cifar10_asymmetric
@@ -29,6 +31,8 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 # Experiment Setting Control Panel
 # ---------------------------------------------------
+# Data Dir 
+DATADIR = "/data/songzhu/tinyimagenet/tiny-imagenet-200"
 # ELR
 BETA: float = 3
 LAMBDA: float = 0.8
@@ -98,6 +102,8 @@ def main(args):
             model_cls_clean_state_dict = torch.load(f"./data/CIFAR10_resnet18_clean_{int(args.noise_strength * 100)}.pth")
         else:
             model_cls_clean_state_dict = torch.load("./data/CIFAR10_resnet18_clean.pth")
+    else:
+        raise ValueError("Dataset doesn't implemented")
 
     validset_noise = copy.deepcopy(validset)
     train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, worker_init_fn=_init_fn(worker_id=seed))

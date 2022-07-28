@@ -2,12 +2,14 @@ from distutils.command.bdist import show_formats
 import os
 import sys
 import random
+from collections import defaultdict
 from typing import List, Callable, Optional, Any
 sys.path.append("./")
 sys.path.append("../")
 
 import torch
 import torch.utils.data as data
+from torch.utils.data import Sampler, BatchSampler, SequentialSampler
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from PIL import Image
@@ -16,7 +18,6 @@ from tqdm import tqdm
 from termcolor import cprint
 
 from network.network import resnet18
-
 
 def pil_loader(path: str) -> Image.Image:
     # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
@@ -66,8 +67,35 @@ def load_allimages(dir):
     return images
 
 
-class TImgNetDatasetTrain(datasets.ImageFolder):
+class PairBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size, num_iterations=None):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.num_iterations = num_iterations
 
+    def __iter__(self):
+        indices = list(range(len(self.dataset)))
+        random.shuffle(indices)
+        for k in range(len(self)):
+            if self.num_iterations is None:
+                offset = k*self.batch_size
+                batch_indices = indices[offset:offset+self.batch_size]
+            else:
+                batch_indices = random.sample(range(len(self.dataset)), self.batch_size)
+            pair_indices = []
+            for idx in batch_indices:
+                y = self.dataset.get_class(idx)
+                pair_indices.append(random.choice(self.dataset.classwise_indices[y]))
+            yield batch_indices + pair_indices
+
+    def __len__(self):
+        if self.num_iterations is None:
+            return (len(self.dataset)+self.batch_size-1) // self.batch_size
+        else:
+            return self.num_iterations
+
+class TImgNetDatasetTrain(datasets.ImageFolder):
+    
     def __init__(self, 
                 root: str, 
                 transform: Optional[Callable] = None, 
@@ -81,6 +109,11 @@ class TImgNetDatasetTrain(datasets.ImageFolder):
         self.split = split
 
         self._train_valid_split(self.train_valid_split)
+
+        self.classwise_indices = defaultdict(list)
+        for i in range(len(self)):
+            y = self.targets[i]
+            self.classwise_indices[y].append(i)
 
     def _train_valid_split(self, train_valid_ratio):
         n = len(self.imgs)
@@ -100,6 +133,9 @@ class TImgNetDatasetTrain(datasets.ImageFolder):
     def update_labels(self, new_targets):
         self.targets[:] = new_targets[:]
 
+    def get_class(self, indice):
+        return self.targets[indice]
+
     def __getitem__(self, index: int):
         path, target = self.samples[index]
         sample = self.loader(path)
@@ -109,6 +145,7 @@ class TImgNetDatasetTrain(datasets.ImageFolder):
             target = self.target_transform(target)
         return index, sample, target
 
+
 class TImgNetDatasetTest(data.Dataset):
     """Dataset wrapping images and ground truths."""
     
@@ -117,10 +154,10 @@ class TImgNetDatasetTest(data.Dataset):
         self.transform = transform
         self.gt_path = gt_path
         self.class_to_idx = class_to_idx
-        self.classidx = []
+        self.targets = []
         self.imgs, self.classnames = parseClasses(gt_path)
         for classname in self.classnames:
-            self.classidx.append(self.class_to_idx[classname])
+            self.targets.append(self.class_to_idx[classname])
 
     def __getitem__(self, index):
             """
@@ -135,7 +172,7 @@ class TImgNetDatasetTest(data.Dataset):
                 img = img.convert('RGB')
                 if self.transform is not None:
                     img = self.transform(img)
-            y = self.classidx[index]
+            y = self.targets[index]
             return index, img, y
 
     def __len__(self):
@@ -147,8 +184,8 @@ if __name__ == '__main__':
     # Experiment Setting Control Panel
     SEED: int = 123
     N_EPOCH: int = 8
-    LR: float = 1e-4
-    WEIGHT_DECAY: float = 1e-3
+    LR: float = 1e-6
+    WEIGHT_DECAY: float = 1e-2
     BATCH_SIZE: int = 128
     SCHEDULER_DECAY_MILESTONE: List = [20, 40, 60]
     TRAIN_VALIDATION_RATIO: float = 0.8

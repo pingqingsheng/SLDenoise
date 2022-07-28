@@ -1,8 +1,11 @@
+import math
+
 import torch
 import torch.nn as nn
 # from pytorchcv.model_provider import get_model
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
+import gpytorch
 
 __all__ = ['ResNet', 'resnet18', 'ResNet_MC', 'resnet18_mc']
 
@@ -176,7 +179,11 @@ def resnet18(pretrained=False, **kwargs):
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
     if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
+        pretrained_dict = model_zoo.load_url(model_urls['resnet18'])
+        pretrained_dict.pop('fc.weight'), pretrained_dict.pop('fc.bias')
+        model_dict = model.state_dict()
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
     return model
 
 def resnet34(pretrained=False, **kwargs):
@@ -349,5 +356,75 @@ def resnet18_mc(pretrained=False, **kwargs):
     """
     model = ResNet_MC(BasicBlock_MC, [2, 2, 2, 2], **kwargs)
     if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
+        pretrained_dict = model_zoo.load_url(model_urls['resnet18'])
+        pretrained_dict.pop('fc.weight'), pretrained_dict.pop('fc.bias')
+        model_dict = model.state_dict()
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+    return model
+
+
+class GaussianProcessLayer(gpytorch.models.ApproximateGP):
+    def __init__(self, num_dim, grid_bounds=(-10., 10.), grid_size=128):
+        
+        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+            num_inducing_points=grid_size, 
+            batch_shape=torch.Size([num_dim])
+        )
+        
+        variational_strategy = gpytorch.variational.IndependentMultitaskVariationalStrategy(
+            gpytorch.variational.GridInterpolationVariationalStrategy(
+                self, 
+                grid_size = grid_size, 
+                grid_bounds=[grid_bounds], 
+                variational_distribution=variational_distribution
+            ), num_tasks=num_dim
+        )
+        
+        super().__init__(variational_strategy)
+        
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(
+                lengthscale_prior=gpytorch.priors.SmoothedBoxPrior(
+                    math.exp(-1), math.exp(1), sigma=0.1, transform=torch.exp
+                )
+            )
+        )
+        self.mean_module = gpytorch.means.ConstantMean()
+        self.grid_bounds = grid_bounds
+
+    def forward(self, x):
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+    
+    
+class ResNet18GP(nn.Module):
+    
+    def __init__(self, in_dim, in_channels, grid_bounds=(-10. , 10.)) -> None:
+        super().__init__()
+        self.encoder = resnet18(num_classes=in_dim, in_channels=in_channels)
+        self.gp_layer = GaussianProcessLayer(num_dim=self.encoder.fc.out_features, grid_bounds=grid_bounds)
+        self.grid_bounds = grid_bounds
+        self.num_dim = self.encoder.fc.out_features
+        self.scaling = gpytorch.utils.grid.ScaleToBounds(self.grid_bounds[0], self.grid_bounds[1])
+        
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.scaling(x).transpose(-1, -2).unsqueeze(-1)
+        x = self.gp_layer(x)
+        return x
+
+def resnet18gp(in_dim, in_channels, pretrained=False, **kwargs):
+    """Constructs a ResNet-18 with GP layer model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet18GP(in_dim=in_dim, in_channels=in_channels , **kwargs)
+    if pretrained:
+        pretrained_dict = model_zoo.load_url(model_urls['resnet18'])
+        pretrained_dict.pop('fc.weight'), pretrained_dict.pop('fc.bias')
+        model_dict = model.state_dict()
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
     return model

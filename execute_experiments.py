@@ -120,15 +120,26 @@ def main(args):
                       f" --noise_strength {noise_strength}"+ \
                       f" --figure {bg}"
                 os.system(cmd)
+            elif METHOD == 'focalloss':
+                ## Focal Loss
+                if os.path.exists("./baselines"):
+                    os.chdir("./baselines")
+                cmd = f"python -W ignore run_focalloss.py"+\
+                      f" --gpus {args.gpus}"+\
+                      f" --dataset {dataset}"+\
+                      f" --noise_type {noise_type}"+\
+                      f" --noise_strength {noise_strength}"+ \
+                      f" --figure {bg}"
+                os.system(cmd)
             else:
                 print(f"No such baseline! {METHOD}")
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
-    parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used")
-    parser.add_argument("--method", type=str, help="Method", choices={'oursdev', 'oursv2', 'ts', 'mcdrop', 'ensemble', 'cskd', 'gpc'})
-    parser.add_argument("--dataset", type=str, help="Experiment Dataset", choices={'mnist', 'cifar10', 'cifar100'})
+    parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", required=True)
+    parser.add_argument("--method", type=str, help="Method", choices={'oursdev', 'oursv2', 'ts', 'mcdrop', 'ensemble', 'cskd', 'gpc', 'focalloss'}, required=True)
+    parser.add_argument("--dataset", type=str, help="Experiment Dataset", choices={'mnist', 'cifar10', 'cifar100'}, required=True)
     # parser.add_argument("--noise_strength", type=float, help="Noise fraction", choices={0.2, 0.4, 0.6, 0.8})
     args = parser.parse_args()
 

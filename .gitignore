@@ -15,6 +15,7 @@ data/MNIST_CSKD/
 data/MNIST_MIXUP/
 data/CIFAR10/
 data/MNIST_SLDenoise/
+data/*.pth
 
 exp_logs/
 logs/

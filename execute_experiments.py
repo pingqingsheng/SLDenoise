@@ -13,7 +13,7 @@ def main(args):
 
         dataset_list = [DATASET]
         noise_strength_list = [NOISE_STRENGTH]
-        noise_type_list = ['uniform', 'idl']
+        noise_type_list = ['uniform', 'linear']
 
         for exp_combo in product(dataset_list, noise_type_list, noise_strength_list):
             dataset, noise_type, noise_strength = exp_combo
@@ -131,6 +131,28 @@ def main(args):
                       f" --noise_strength {noise_strength}"+ \
                       f" --figure {bg}"
                 os.system(cmd)
+            elif METHOD == 'bm':
+                ## BayesMoment Matching
+                if os.path.exists("./baselines"):
+                    os.chdir("./baselines")
+                cmd = f"python -W ignore run_bm.py"+\
+                      f" --gpus {args.gpus}"+\
+                      f" --dataset {dataset}"+\
+                      f" --noise_type {noise_type}"+\
+                      f" --noise_strength {noise_strength}"+ \
+                      f" --figure {bg}"
+                os.system(cmd)
+            elif METHOD == 'lula':
+                ## learnable uncertainty under laplace approaximation
+                if os.path.exists("./baselines"):
+                        os.chdir("./baselines")
+                cmd = f"python -W ignore run_lula.py"+\
+                      f" --gpus {args.gpus}"+\
+                      f" --dataset {dataset}"+\
+                      f" --noise_type {noise_type}"+\
+                      f" --noise_strength {noise_strength}"+ \
+                      f" --figure {bg}"
+                os.system(cmd)
             else:
                 print(f"No such baseline! {METHOD}")
 
@@ -138,7 +160,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
     parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", required=True)
-    parser.add_argument("--method", type=str, help="Method", choices={'oursdev', 'oursv2', 'ts', 'mcdrop', 'ensemble', 'cskd', 'gpc', 'focalloss'}, required=True)
+    parser.add_argument("--method", type=str, help="Method", choices={'oursdev', 'oursv2', 'ts', 'mcdrop', 'ensemble', 'cskd', 'gpc', 'focalloss', 'bm', 'lula'}, required=True)
     parser.add_argument("--dataset", type=str, help="Experiment Dataset", choices={'mnist', 'cifar10', 'cifar100'}, required=True)
     # parser.add_argument("--noise_strength", type=float, help="Noise fraction", choices={0.2, 0.4, 0.6, 0.8})
     args = parser.parse_args()

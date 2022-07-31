@@ -299,7 +299,7 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, exogeneous_var=None):
+    def partial_forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -312,7 +312,11 @@ class ResNet(nn.Module):
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-
+        return x
+        
+        
+    def forward(self, x, exogeneous_var=None):
+        x = self.partial_forward(x)
         if exogeneous_var is not None:
             x = torch.cat([x, exogeneous_var.unsqueeze(1)], 1)
             x = self.fc_combo(x)

@@ -32,7 +32,7 @@ NUM_NETS: int = 5
 # General setting
 TRAIN_VALIDATION_RATIO: float = 0.9
 N_EPOCH_OUTER: int = 1
-N_EPOCH_INNER_CLS: int = 1
+N_EPOCH_INNER_CLS: int = 40
 CONF_RECORD_EPOCH: int = N_EPOCH_INNER_CLS - 1
 LR: float = 1e-4
 WEIGHT_DECAY: float = 1e-3

@@ -3,6 +3,7 @@ import sys
 import json
 from typing import List
 sys.path.append("../")
+sys.path.append("/home/songzhu/SLDenoise/")
 
 import torch
 import torch.nn.functional as F
@@ -16,6 +17,7 @@ import random
 from tqdm import tqdm
 from termcolor import cprint
 import datetime
+import pickle as pkl
 
 from data.TINYIMAGENET_CSKD import TImgNetDatasetTrain, TImgNetDatasetTest, PairBatchSampler
 from network.network import resnet18, resnet34
@@ -24,14 +26,14 @@ from utils.utils import _init_fn, ECELoss
 # Experiment Setting Control Panel
 # ---------------------------------------------------
 # Data Dir 
-DATADIR = "/data/songzhu/tinyimagenet/tiny-imagenet-200"
+DATADIR = "/scr/songzhu/tinyimagenet/tiny-imagenet-200"
 # Algorithm setting
 TEMPERATURE: float = 4.0 
 LAMBDA: float = 1.0
 # General setting
 TRAIN_VALIDATION_RATIO: float = 0.9
 N_EPOCH_OUTER: int = 1
-N_EPOCH_INNER_CLS: int = 40
+N_EPOCH_INNER_CLS: int = 1
 CONF_RECORD_EPOCH: int = N_EPOCH_INNER_CLS - 1
 LR: float = 1e-4
 WEIGHT_DECAY: float = 1e-3
@@ -94,9 +96,9 @@ def main(args):
     get_train_sampler = lambda d: PairBatchSampler(d, BATCH_SIZE)
     get_test_sampler  = lambda d: BatchSampler(SequentialSampler(d), BATCH_SIZE, False)
 
-    train_loader = DataLoader(trainset, pin_memory=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_train_sampler(trainset))
-    valid_loader = DataLoader(validset, pin_memory=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(validset))
-    test_loader  = DataLoader(testset,  pin_memory=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(testset))
+    train_loader = DataLoader(trainset, pin_memory=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_train_sampler(trainset))
+    valid_loader = DataLoader(validset, pin_memory=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(validset))
+    test_loader  = DataLoader(testset,  pin_memory=True, num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(testset))
 
     print("---------------------------------------------------------")
     print("                   Experiment Setting                    ")
@@ -157,7 +159,11 @@ def main(args):
             
             optimizer_cls.zero_grad()
             images, labels = images.to(device), labels.to(device)
-            x, y, x_tilde, y_tilde = images[:BATCH_SIZE//2], labels[:BATCH_SIZE//2], images[:BATCH_SIZE//2], labels[:BATCH_SIZE//2]
+            x, y, x_tilde, _ = images[:BATCH_SIZE], labels[:BATCH_SIZE], images[BATCH_SIZE:], labels[BATCH_SIZE:]
+            
+            if len(x_tilde)==0:
+                x_tilde = x
+            
             outs = model_cls(x)
             with torch.no_grad():
                 outs_tilde = model_cls(x_tilde)
@@ -217,13 +223,17 @@ def main(args):
         test_total = 0
         # For ECE
         test_f_cali = torch.zeros(len(testset), num_classes).float()
+        # For selection 
+        test_f_pred = torch.zeros(len(testset), dtype=torch.long) 
+        test_gt = torch.zeros(len(testset), dtype=torch.long)
 
         model_cls.eval()
         for _, (indices, images, labels) in enumerate(tqdm(test_loader, ascii=True, ncols=100)):
             if images.shape[0] == 1:
                 continue
             images, labels = images.to(device), labels.to(device)
-
+            outs_cali = model_cls(images)
+            
             # Calibrated model result record
             prob_outs = torch.softmax(outs_cali, 1)
             _, predict = prob_outs.max(1)
@@ -231,6 +241,9 @@ def main(args):
             test_correct_cali += correct_prediction.sum().item()
             test_f_cali[indices] = prob_outs.detach().cpu()
             test_total += len(images)
+           
+            test_f_pred[indices] = predict.detach().cpu()
+            test_gt[indices] = labels.detach().cpu()
            
         test_acc_cali = test_correct_cali/test_total
         ece_loss_cali = criterion_calibrate.forward(logits=test_f_cali, labels=torch.tensor(y_tilde_test))
@@ -271,13 +284,13 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_tinyimagenet_cskd_plot_{time_stamp}.png"))
 
-    return ece_loss_cali.item(), _best_cali_ece, test_acc_cali, _best_cali_acc
+    return ece_loss_cali.item(), _best_cali_ece, test_acc_cali, _best_cali_acc, test_f_cali, test_f_pred, test_gt
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguement for SLDenoise")
     parser.add_argument("--seed", type=int, help="Random seed for the experiment", default=77)
-    parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='0')
+    parser.add_argument("--gpus", type=str, help="Indices of GPUs to be used", default='7')
     parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
     parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
     parser.add_argument("--figure", action='store_true', help='True to plot performance log')
@@ -308,6 +321,8 @@ if __name__ == "__main__":
     exp_config['test_acc_cali'] = []
     exp_config['best_acc_cali'] = []
     
+    data_save_dict = {}
+    
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
     save_folder = os.path.join("./exp_logs/cskd_"+dir_date)
     os.makedirs(save_folder, exist_ok=True)
@@ -315,15 +330,27 @@ if __name__ == "__main__":
     save_file_name = os.path.join(save_folder, save_file_name)
     print(save_file_name)
     
+    data_save_folder = os.path.join("./rebuttal_data/cskd_"+dir_date)
+    os.makedirs(data_save_folder, exist_ok=True)
+    data_save_file_name = 'cskd_' + datetime.date.today().strftime("%d_%m_%Y") + f"tinyimagenet.pkl"
+    data_save_file_name = os.path.join(data_save_folder, data_save_file_name)
+    print(data_save_file_name)
+    
     for seed in [77, 78, 79]:
         args.seed = seed
-        ece_cali, best_ece_cali, test_acc_cali, best_acc_cali = main(args)
+        ece_cali, best_ece_cali, test_acc_cali, best_acc_cali, test_f_cali, test_f_pred, test_gt = main(args)
 
         exp_config['ece_cali'].append(ece_cali)
         exp_config['best_ece_cali'].append(best_ece_cali)
         exp_config['test_acc_cali'].append(test_acc_cali)
         exp_config['best_acc_cali'].append(best_acc_cali)
+        
+        data_save_dict[seed] = (test_f_cali, test_gt, test_f_pred)
 
         with open(save_file_name, "w") as f:
             json.dump(exp_config, f, sort_keys=False, indent=4)
+        f.close()
+        
+        with open(data_save_file_name, 'wb') as f:
+            pkl.dump(data_save_dict, f)
         f.close()

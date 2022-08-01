@@ -9,7 +9,7 @@ def main(args):
     DATASET = args.dataset
     # NOISE_STRENGTH = float(args.noise_strength)
 
-    for NOISE_STRENGTH in [0.2, 0.4, 0.6]:
+    for NOISE_STRENGTH in [0.6]:
 
         dataset_list = [DATASET]
         noise_strength_list = [NOISE_STRENGTH]

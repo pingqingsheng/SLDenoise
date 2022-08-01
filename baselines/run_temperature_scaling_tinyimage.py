@@ -16,6 +16,7 @@ import random
 from tqdm import tqdm
 from termcolor import cprint
 import datetime
+import pickle as pkl
 
 from data.TINYIMAGENET import TImgNetDatasetTrain, TImgNetDatasetTest
 from network.network import resnet18, resnet34
@@ -24,7 +25,7 @@ from utils.utils import _init_fn, ECELoss
 # Experiment Setting Control Panel
 # ---------------------------------------------------
 # Data Dir 
-DATADIR = "/data/songzhu/tinyimagenet/tiny-imagenet-200"
+DATADIR = "/scr/songzhu/tinyimagenet/tiny-imagenet-200"
 # General setting
 TRAIN_VALIDATION_RATIO: float = 0.9
 N_EPOCH_OUTER: int = 1
@@ -48,7 +49,7 @@ def main(args):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True  # need to set to True as well
 
-    device = torch.device(f"cuda:0" if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f"cuda:{args.gpus}" if torch.cuda.is_available() else 'cpu')
 
     traindir = os.path.join(DATADIR, 'train')
     testdir  = os.path.join(DATADIR, 'val')
@@ -213,6 +214,9 @@ def main(args):
         # For ECE
         test_f_raw  = torch.zeros(len(testset), num_classes).float()
         test_f_cali = torch.zeros(len(testset), num_classes).float()
+        # For selection 
+        test_f_pred = torch.zeros(len(testset), dtype=torch.long) 
+        test_gt = torch.zeros(len(testset), dtype=torch.long)
 
         model_cls.eval()
         model_cls_cali.eval()
@@ -237,6 +241,9 @@ def main(args):
             correct_prediction = predict.eq(labels).float()
             test_correct_cali += correct_prediction.sum().item()
             test_f_cali[indices] = prob_outs.detach().cpu()
+            
+            test_f_pred[indices] = predict.detach().cpu()
+            test_gt[indices] = labels.detach().cpu()
            
         test_acc_raw  = test_correct_raw/test_total
         test_acc_cali = test_correct_cali/test_total
@@ -288,7 +295,7 @@ def main(args):
         time_stamp = datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d")
         fig.savefig(os.path.join("./figures", f"exp_log_tinyimagenet_ts_plot_{time_stamp}.png"))
 
-    return ece_loss_raw.item(), ece_loss_cali.item(), _best_cali_ece, test_acc_cali, _best_cali_acc
+    return ece_loss_raw.item(), ece_loss_cali.item(), _best_cali_ece, test_acc_cali, _best_cali_acc, test_f_cali, test_gt, test_f_pred
 
 
 class ModelWithTemperature(nn.Module):
@@ -395,6 +402,8 @@ if __name__ == "__main__":
     exp_config['test_acc_cali'] = []
     exp_config['best_acc_cali'] = []
     
+    data_save_dict = {}
+    
     dir_date = datetime.datetime.today().strftime("%Y%m%d")
     save_folder = os.path.join("./exp_logs/ts_"+dir_date)
     os.makedirs(save_folder, exist_ok=True)
@@ -402,16 +411,28 @@ if __name__ == "__main__":
     save_file_name = os.path.join(save_folder, save_file_name)
     print(save_file_name)
     
+    data_save_folder = os.path.join("./rebuttal_data/ts_"+dir_date)
+    os.makedirs(data_save_folder, exist_ok=True)
+    data_save_file_name = 'ts_' + datetime.date.today().strftime("%d_%m_%Y") + f"tinyimagenet.pkl"
+    data_save_file_name = os.path.join(data_save_folder, data_save_file_name)
+    print(data_save_file_name)
+    
     for seed in [77, 78, 79]:
         args.seed = seed
-        ece_raw, ece_cali, best_ece_cali, test_acc_cali, best_acc_cali = main(args)
+        ece_raw, ece_cali, best_ece_cali, test_acc_cali, best_acc_cali, test_f_cali, test_gt, test_f_pred = main(args)
 
         exp_config['ece_raw'].append(ece_raw)
         exp_config['ece_cali'].append(ece_cali)
         exp_config['best_ece_cali'].append(best_ece_cali)
         exp_config['test_acc_cali'].append(test_acc_cali)
         exp_config['best_acc_cali'].append(best_acc_cali)
+        
+        data_save_dict[seed] = (test_f_cali, test_gt, test_f_pred)
 
         with open(save_file_name, "w") as f:
             json.dump(exp_config, f, sort_keys=False, indent=4)
+        f.close()
+        
+        with open(data_save_file_name, 'wb') as f:
+            pkl.dump(data_save_dict, f)
         f.close()

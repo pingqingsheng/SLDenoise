@@ -28,5 +28,12 @@ data/cifar-10-python.tar.gz
 
 debug/
 /baselines/data
+/baselines/rebuttal_data/
+/baselines/tmp/
 
 iterative_fig/
+
+rebuttal_data/
+
+.vscode/
+

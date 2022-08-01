@@ -1,6 +1,7 @@
 import os
 import sys
 sys.path.append("../")
+sys.path.append("/home/songzhu/SLDenoise/")
 from typing import List
 import random
 import copy
@@ -345,6 +346,9 @@ def main(args):
             # For L1
             test_f_raw_target_conf = torch.zeros(len(testset)).float()
             test_f_cali_target_conf = torch.zeros(len(testset)).float()
+            # For selection 
+            test_f_pred = torch.zeros(len(testset), dtype=torch.long) 
+            test_gt = torch.zeros(len(testset), dtype=torch.long)
 
             for _, (indices, images, labels, _) in enumerate(tqdm(test_loader, ascii=True, ncols=100)):
                 if images.shape[0] == 1:
@@ -382,6 +386,9 @@ def main(args):
                 test_correct_cali += correct_prediction.sum().item()
                 test_f_cali[indices] = prob_outs.detach().cpu()
                 test_f_cali_target_conf[indices] = prob_outs.max(1)[0].detach().cpu()
+                
+                test_f_pred[indices] = predict.detach().cpu().squeeze()
+                test_gt[indices] = labels.detach().cpu().squeeze()
 
             test_acc_raw = test_correct_raw/test_total
             test_acc_cali = test_correct_cali/test_total

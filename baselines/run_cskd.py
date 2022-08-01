@@ -1,6 +1,10 @@
 import os
 import sys
 sys.path.append("../")
+sys.path.append("/home/songzhu/SLDenoise")
+
+os.chdir("/home/songzhu/SLDenoise/baselines")
+
 from typing import List
 import json
 import pdb
@@ -34,7 +38,7 @@ TRAIN_VALIDATION_RATIO: float = 0.8
 N_EPOCH_OUTER: int = 1
 N_EPOCH_INNER_CLS: int = 200
 CONF_RECORD_EPOCH: int = N_EPOCH_INNER_CLS - 1
-LR: float = 5e-2
+LR: float = 1e-2
 WEIGHT_DECAY: float = 5e-3
 BATCH_SIZE: int = 128
 SCHEDULER_DECAY_MILESTONE: List = [40, 80, 120]
@@ -112,9 +116,10 @@ def main(args):
     get_test_sampler  = lambda d: BatchSampler(SequentialSampler(d), BATCH_SIZE, False)
 
     validset_noise = copy.deepcopy(validset)
-    train_loader = DataLoader(trainset,  num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_train_sampler(trainset))
-    valid_loader = DataLoader(validset,  num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(validset))
-    test_loader = DataLoader(testset, num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(testset))
+    train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader = DataLoader(validset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
+    valid_loader_noise = DataLoader(validset_noise, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, worker_init_fn=_init_fn(worker_id=seed))
 
     # Inject noise here
     y_train = copy.deepcopy(trainset.targets)
@@ -144,6 +149,10 @@ def main(args):
     h_star_train = eta_train.argmax(1).squeeze()
     h_star_valid = eta_valid.argmax(1).squeeze()
     h_star_test = eta_test.argmax(1).squeeze()
+    
+    train_loader = DataLoader(trainset,  num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_train_sampler(trainset))
+    valid_loader = DataLoader(validset,  num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(validset))
+    test_loader = DataLoader(testset, num_workers=1, worker_init_fn=_init_fn(worker_id=seed), batch_sampler=get_test_sampler(testset))
 
     if args.noise_type=='linear':
         eta_tilde_train = perturb_eta(eta_train, args.noise_type, args.noise_strength)
@@ -256,8 +265,12 @@ def main(args):
                 continue
             optimizer_cls.zero_grad()
             images, labels = images.to(device), labels.to(device)
-            x, y, x_tilde, y_tilde = images[:BATCH_SIZE//2], labels[:BATCH_SIZE//2], images[:BATCH_SIZE//2], labels[:BATCH_SIZE//2]
+            x, y, x_tilde, _ = images[:BATCH_SIZE], labels[:BATCH_SIZE], images[BATCH_SIZE:], labels[BATCH_SIZE:]
             outs = model_cls(x)
+            
+            if len(x_tilde)==0:
+                x_tilde = x
+            
             with torch.no_grad():
                 outs_tilde = model_cls(x_tilde)
             _, predict = outs[:, :NUM_CLASSES].max(1)
@@ -421,9 +434,9 @@ def main(args):
         'valid_cali_ece': _ece_cali_record, 
         'valid_cali_l1': _l1_cali_record
     }
-    with open(debuglogger, 'wb') as f:
-        pkl.dump(debugresult, f)
-    f.close()
+    # with open(debuglogger, 'wb') as f:
+    #     pkl.dump(debugresult, f)
+    # f.close()
     # >>>>>>>>>>>>>>>>>>
     
     return l1_loss_cali.item(), _best_cskd_l1.item(), ece_loss_cali.item(), _best_cskd_ece.item(), test_acc_cali, _best_cali_acc
@@ -485,7 +498,7 @@ if __name__ == "__main__":
                         choices={'mnist', 'cifar10', 'cifar100'})
     parser.add_argument("--noise_type", type=str, help="Noise type", default='linear',
                         choices={"linear", "uniform", "asymmetric", "idl"})
-    parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=1)
+    parser.add_argument("--noise_strength", type=float, help="Noise fraction", default=0.01)
     parser.add_argument("--rollWindow", default=3, help="rolling window to calculate the confidence", type=int)
     parser.add_argument("--warm_up", default=2, help="warm-up period", type=int)
     parser.add_argument("--figure", action='store_true', help='True to plot performance log')
